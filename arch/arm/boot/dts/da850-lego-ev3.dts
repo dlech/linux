@@ -23,6 +23,11 @@
 		serial1 = &serial1;
 	};
 
+	chosen {
+		bootargs = "console=ttyS1,115200 earlyprintk";
+		stdout-path = &serial1;
+	};
+
 	memory@c0000000 {
 		device_type = "memory";
 		reg = <0xc0000000 0x04000000>;
