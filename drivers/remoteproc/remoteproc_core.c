@@ -163,6 +163,7 @@ EXPORT_SYMBOL(rproc_va_to_pa);
  * @rproc: handle of a remote processor
  * @da: remoteproc device address to translate
  * @len: length of the memory region @da is pointing to
+ * @page: memory page for processors that have more than one memory map
  *
  * Some remote processors will ask us to allocate them physically contiguous
  * memory regions (which we call "carveouts"), and map them to specific
@@ -187,13 +188,13 @@ EXPORT_SYMBOL(rproc_va_to_pa);
  * here the output of the DMA API for the carveouts, which should be more
  * correct.
  */
-void *rproc_da_to_va(struct rproc *rproc, u64 da, int len)
+void *rproc_da_to_va(struct rproc *rproc, u64 da, int len, int page)
 {
 	struct rproc_mem_entry *carveout;
 	void *ptr = NULL;
 
 	if (rproc->ops->da_to_va) {
-		ptr = rproc->ops->da_to_va(rproc, da, len);
+		ptr = rproc->ops->da_to_va(rproc, da, len, page);
 		if (ptr)
 			goto out;
 	}
@@ -1620,7 +1621,7 @@ static void rproc_coredump(struct rproc *rproc)
 		if (segment->dump) {
 			segment->dump(rproc, segment, data + offset);
 		} else {
-			ptr = rproc_da_to_va(rproc, segment->da, segment->size);
+			ptr = rproc_da_to_va(rproc, segment->da, segment->size, 0);
 			if (!ptr) {
 				dev_err(&rproc->dev,
 					"invalid coredump segment (%pad, %zu)\n",
