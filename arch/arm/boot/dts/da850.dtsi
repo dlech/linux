@@ -540,6 +540,14 @@
 			clocks = <&pll0_auxclk>;
 			status = "disabled";
 		};
+		pru_rproc: cpu@30000 {
+			compatible = "ti,da850-pru-rproc";
+			reg = <0x30000 0x10000>;
+			interrupts = <3>, <4>;
+			interrupt-names = "pru0-vq", "pru1-vq";
+			power-domains = <&psc0 13>;
+			status = "disabled";
+		};
 		mmc0: mmc@40000 {
 			compatible = "ti,da830-mmc";
 			reg = <0x40000 0x1000>;
