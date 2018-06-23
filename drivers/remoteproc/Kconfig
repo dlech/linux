@@ -158,6 +158,13 @@ config ST_REMOTEPROC
 config ST_SLIM_REMOTEPROC
 	tristate
 
+config TI_PRU_REMOTEPROC
+	tristate "TI Programmable Realtime Unit"
+	depends on ARCH_DAVINCI_DA8XX || SOC_AM33XX
+	help
+	  Say y here to support TI Programmable Runtime Units (PRUs) via the
+	  remote processor framework.
+
 endif # REMOTEPROC
 
 endmenu
