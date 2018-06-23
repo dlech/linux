@@ -1,0 +1,51 @@
+TI Programmable Realtime Unit (PRU)
+===================================
+
+Some TI Sitara SoCs contain a Programmable Realtime Unit subsystem with two
+processor cores that can be used for hard-realtime tasks.
+
+
+Required properties:
+--------------------
+The following are the mandatory properties:
+
+- compatible:		Should be one of the following,
+			    "ti,da850-pru-rproc" for AM18xx/OMAPL138 SoCs
+			    "ti,am3352-pru-rproc" for AM355x SoCs
+
+- reg:			Should contain the memory region for the PRUSS
+
+- interrupts: 		Should contain the interrupt number used to receive the
+			virtualqueue kick interrupts from the PRU (i.e.
+			PRU_EVTOUT0 and PRU_EVTOUT1)
+
+- interrupt-names	Should contain "pru0-vq", "pru1-vq"
+
+Optional properties:
+--------------------
+
+- power-domains:	A phandle to the power domain that powers the PRUSS
+
+- ti,hwmods:		Name of the hwmod associated to the PRUSS, which is
+			typically "pruss"
+
+Example:
+--------
+
+	// AM18xx
+	pru_rproc: cpu@30000 {
+		compatible = "ti,da850-pru-rproc";
+		reg = <0x30000 0x10000>;
+		interrupts = <3>, <4>;
+		interrupt-names = "pru0-vq", "pru1-vq";
+		power-domains = <&psc0 13>;
+	};
+
+	// AM335x
+	pru_rproc: cpu@4a300000 {
+		compatible = "ti,am3352-pru-rproc";
+		reg = <0x4a300000 0x80000>;
+		interrupts = <20>, <21>;
+		interrupt-names = "pru0-vq", "pru1-vq";
+		ti,hwmods = "pruss";
+	};
