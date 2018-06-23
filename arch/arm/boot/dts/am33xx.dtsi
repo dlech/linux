@@ -924,6 +924,15 @@
 			};
 		};
 
+		pru_rproc: cpu@4a300000 {
+			compatible = "ti,am3352-pru-rproc";
+			reg = <0x4a300000 0x80000>;
+			interrupts = <20>, <21>;
+			interrupt-names = "pru0-vq", "pru1-vq";
+			ti,hwmods = "pruss";
+			status = "disabled";
+		};
+
 		elm: elm@48080000 {
 			compatible = "ti,am3352-elm";
 			reg = <0x48080000 0x2000>;
