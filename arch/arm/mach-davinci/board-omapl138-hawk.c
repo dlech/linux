@@ -236,14 +236,9 @@ static __init void omapl138_hawk_usb_init(void)
 		return;
 	}
 
-	ret = da8xx_register_usb20_phy_clk(false);
+	ret = da8xx_register_usb_phy_clocks();
 	if (ret)
-		pr_warn("%s: USB 2.0 PHY CLK registration failed: %d\n",
-			__func__, ret);
-
-	ret = da8xx_register_usb11_phy_clk(false);
-	if (ret)
-		pr_warn("%s: USB 1.1 PHY CLK registration failed: %d\n",
+		pr_warn("%s: USB PHY CLK registration failed: %d\n",
 			__func__, ret);
 
 	ret = da8xx_register_usb_phy();
@@ -284,6 +279,8 @@ usb11_setup_oc_fail:
 static __init void omapl138_hawk_init(void)
 {
 	int ret;
+
+	da850_register_clocks();
 
 	ret = da850_register_gpio();
 	if (ret)

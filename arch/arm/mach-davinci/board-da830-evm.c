@@ -110,15 +110,9 @@ static __init void da830_evm_usb_init(void)
 {
 	int ret;
 
-	/* USB_REFCLKIN is not used. */
-	ret = da8xx_register_usb20_phy_clk(false);
+	ret = da8xx_register_usb_phy_clocks();
 	if (ret)
-		pr_warn("%s: USB 2.0 PHY CLK registration failed: %d\n",
-			__func__, ret);
-
-	ret = da8xx_register_usb11_phy_clk(false);
-	if (ret)
-		pr_warn("%s: USB 1.1 PHY CLK registration failed: %d\n",
+		pr_warn("%s: USB PHY CLK registration failed: %d\n",
 			__func__, ret);
 
 	ret = da8xx_register_usb_phy();
@@ -556,6 +550,8 @@ static __init void da830_evm_init(void)
 {
 	struct davinci_soc_info *soc_info = &davinci_soc_info;
 	int ret;
+
+	da830_register_clocks();
 
 	ret = da830_register_gpio();
 	if (ret)
