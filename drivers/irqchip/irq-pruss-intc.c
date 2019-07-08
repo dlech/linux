@@ -5,6 +5,8 @@
  * Copyright (C) 2016-2019 Texas Instruments Incorporated - http://www.ti.com/
  *	Andrew F. Davis <afd@ti.com>
  *	Suman Anna <s-anna@ti.com>
+ *
+ * Copyright (C) 2019 David Lechner <david@lechnology.com>
  */
 
 #include <linux/interrupt.h>
@@ -14,6 +16,14 @@
 #include <linux/module.h>
 #include <linux/of_device.h>
 #include <linux/platform_device.h>
+#include <linux/pm_runtime.h>
+
+#include <dt-bindings/interrupt-controller/ti-pruss.h>
+
+/* The number of possible interrupt domains, see TI_PRUSS_INTC_DOMAIN_* in
+ * dt-bindings/interrupt-controller/ti-pruss.h
+ */
+#define NUM_TI_PRUSS_INTC_DOMAIN 5
 
 /*
  * Number of host interrupts reaching the main MPU sub-system. Note that this
@@ -24,6 +34,12 @@
 
 /* minimum starting host interrupt number for MPU */
 #define MIN_PRU_HOST_INT	2
+
+/* maximum number of host interrupts */
+#define MAX_PRU_HOST_INT	10
+
+/* maximum number of interrupt channels */
+#define MAX_PRU_CHANNELS	10
 
 /* maximum number of system events */
 #define MAX_PRU_SYS_EVENTS	64
@@ -57,27 +73,83 @@
 #define PRU_INTC_HINLR(x)	(0x1100 + (x) * 4)
 #define PRU_INTC_HIER		0x1500
 
+/* CMR register bit-field macros */
+#define CMR_EVT_MAP_MASK	0xf
+#define CMR_EVT_MAP_BITS	8
+#define CMR_EVT_PER_REG		4
+
+/* HMR register bit-field macros */
+#define HMR_CH_MAP_MASK		0xf
+#define HMR_CH_MAP_BITS		8
+#define HMR_CH_PER_REG		4
+
 /* HIPIR register bit-fields */
 #define INTC_HIPIR_NONE_HINT	0x80000000
 
 /**
+ * struct pruss_intc_hwirq_data - additional metadata associated with a PRU
+ * system event
+ * @evtsel: The event select index (AM18xx only)
+ * @channel: The PRU INTC channel that the system event should be mapped to
+ * @host: The PRU INTC host that the channel should be mapped to
+ */
+struct pruss_intc_hwirq_data {
+	u8 evtsel;
+	u8 channel;
+	u8 host;
+};
+
+/**
+ * struct pruss_intc_map_record - keeps track of actual mapping state
+ * @value: The currently mapped value (evtsel, channel or host)
+ * @ref_count: Keeps track of number of current users of this resource
+ */
+struct pruss_intc_map_record {
+	u8 value;
+	u8 ref_count;
+};
+
+/**
+ * struct pruss_intc_domain - information specific to an external IRQ domain
+ * @hwirq_data: Table of additional mapping data received from device tree
+ *	or PRU firmware
+ * @domain: irq domain
+ * @intc: the interrupt controller
+ * @id: Unique domain identifier (from device tree bindings)
+ */
+struct pruss_intc_domain {
+	struct pruss_intc_hwirq_data hwirq_data[MAX_PRU_SYS_EVENTS];
+	struct irq_domain *domain;
+	struct pruss_intc *intc;
+	u32 id;
+};
+
+/**
  * struct pruss_intc - PRUSS interrupt controller structure
+ * @domain: External interrupt domains
+ * @evtsel: Tracks the current state of CFGCHIP3[3].PRUSSEVTSEL (AM18xx only)
+ * @event_channel: Tracks the current state of system event to channel mappings
+ * @channel_host: Tracks the current state of channel to host mappings
  * @irqs: kernel irq numbers corresponding to PRUSS host interrupts
  * @base: base virtual address of INTC register space
  * @irqchip: irq chip for this interrupt controller
- * @domain: irq domain for this interrupt controller
  * @lock: mutex to serialize access to INTC
  * @shared_intr: bit-map denoting if the MPU host interrupt is shared
  * @invalid_intr: bit-map denoting if host interrupt is not connected to MPU
+ * @has_evtsel: indicates that the chip has an event select mux
  */
 struct pruss_intc {
+	struct pruss_intc_domain domain[NUM_ISA_INTERRUPTS];
+	struct pruss_intc_map_record evtsel;
+	struct pruss_intc_map_record event_channel[MAX_PRU_SYS_EVENTS];
+	struct pruss_intc_map_record channel_host[MAX_PRU_CHANNELS];
 	unsigned int irqs[MAX_NUM_HOST_IRQS];
 	void __iomem *base;
 	struct irq_chip *irqchip;
-	struct irq_domain *domain;
 	struct mutex lock; /* PRUSS INTC lock */
 	u16 shared_intr;
 	u16 invalid_intr;
+	bool has_evtsel;
 };
 
 static inline u32 pruss_intc_read_reg(struct pruss_intc *intc, unsigned int reg)
@@ -103,6 +175,172 @@ static int pruss_intc_check_write(struct pruss_intc *intc, unsigned int reg,
 	pruss_intc_write_reg(intc, reg, sysevent);
 
 	return 0;
+}
+
+/**
+ * pruss_intc_map() - configure the PRUSS INTC
+ * @domain: pru intc domain pointer
+ * @hwirq: the system event number
+ *
+ * Configures the PRUSS INTC with the provided configuration from the one
+ * parsed in the xlate function. Any existing event to channel mappings or
+ * channel to host interrupt mappings are checked to make sure there are no
+ * conflicting configuration between both the PRU cores.
+ *
+ * Returns 0 on success, or a suitable error code otherwise
+ */
+static int pruss_intc_map(struct pruss_intc_domain *domain, unsigned long hwirq)
+{
+	struct pruss_intc *intc = domain->intc;
+	struct device* dev = intc->irqchip->parent_device;
+	u32 val;
+	int idx, ret;
+	u8 evtsel, ch, host;
+
+	if (hwirq >= MAX_PRU_SYS_EVENTS)
+		return -EINVAL;
+
+	mutex_lock(&intc->lock);
+
+	evtsel = domain->hwirq_data[hwirq].evtsel;
+	ch = domain->hwirq_data[hwirq].channel;
+	host = domain->hwirq_data[hwirq].host;
+
+	if (intc->has_evtsel && intc->evtsel.ref_count > 0 &&
+	    intc->evtsel.value != evtsel) {
+		dev_err(dev, "event %lu (req. evtsel %d) already assigned to evtsel %d\n",
+			hwirq, evtsel, intc->evtsel.value);
+		ret = -EBUSY;
+		goto unlock;
+	}
+
+	/* check if sysevent already assigned */
+	if (intc->event_channel[hwirq].ref_count > 0 &&
+	    intc->event_channel[hwirq].value != ch) {
+		dev_err(dev, "event %lu (req. channel %d) already assigned to channel %d\n",
+			hwirq, ch, intc->event_channel[hwirq].value);
+		ret = -EBUSY;
+		goto unlock;
+	}
+
+	/* check if channel already assigned */
+	if (intc->channel_host[ch].ref_count > 0 &&
+	    intc->channel_host[ch].value != host) {
+		dev_err(dev, "channel %d (req. host %d) already assigned to host %d\n",
+			ch, host, intc->channel_host[ch].value);
+		ret = -EBUSY;
+		goto unlock;
+	}
+
+	if (++intc->evtsel.ref_count == 1) {
+		intc->evtsel.value = evtsel;
+
+		/* TODO: need to implement CFGCHIP3[3].PRUSSEVTSEL */
+	}
+
+	if (++intc->event_channel[hwirq].ref_count == 1) {
+		intc->event_channel[hwirq].value = ch;
+
+		/*
+		 * configure channel map registers - each register holds map
+		 * info for 4 events, with each event occupying the lower nibble
+		 * in a register byte address in little-endian fashion
+		 */
+		idx = hwirq / CMR_EVT_PER_REG;
+
+		val = pruss_intc_read_reg(intc, PRU_INTC_CMR(idx));
+		val &= ~(CMR_EVT_MAP_MASK <<
+				((hwirq % CMR_EVT_PER_REG) * CMR_EVT_MAP_BITS));
+		val |= ch << ((hwirq % CMR_EVT_PER_REG) * CMR_EVT_MAP_BITS);
+		pruss_intc_write_reg(intc, PRU_INTC_CMR(idx), val);
+
+		dev_dbg(dev, "SYSEV%lu -> CH%d (CMR%d 0x%08x)\n", hwirq, ch,
+			idx, pruss_intc_read_reg(intc, PRU_INTC_CMR(idx)));
+
+		/* clear and enable system event */
+		pruss_intc_write_reg(intc, PRU_INTC_SICR, hwirq);
+		pruss_intc_write_reg(intc, PRU_INTC_EISR, hwirq);
+	}
+
+	if (++intc->channel_host[ch].ref_count == 1) {
+		intc->channel_host[ch].value = host;
+
+		/*
+		 * set host map registers - each register holds map info for
+		 * 4 channels, with each channel occupying the lower nibble in
+		 * a register byte address in little-endian fashion
+		 */
+		idx = ch / HMR_CH_PER_REG;
+
+		val = pruss_intc_read_reg(intc, PRU_INTC_HMR(idx));
+		val &= ~(HMR_CH_MAP_MASK <<
+				((ch % HMR_CH_PER_REG) * HMR_CH_MAP_BITS));
+		val |= host << ((ch % HMR_CH_PER_REG) * HMR_CH_MAP_BITS);
+		pruss_intc_write_reg(intc, PRU_INTC_HMR(idx), val);
+
+		dev_dbg(dev, "CH%d -> HOST%d (HMR%d 0x%08x)\n", ch, host, idx,
+			pruss_intc_read_reg(intc, PRU_INTC_HMR(idx)));
+
+		/* enable host interrupts */
+		pruss_intc_write_reg(intc, PRU_INTC_HIEISR, host);
+	}
+
+	dev_info(dev, "mapped system_event = %lu channel = %d host = %d domain = %u\n",
+		 hwirq, ch, host, domain->id);
+
+	/* global interrupt enable */
+	pruss_intc_write_reg(intc, PRU_INTC_GER, 1);
+
+	mutex_unlock(&intc->lock);
+	return 0;
+
+unlock:
+	mutex_unlock(&intc->lock);
+	return ret;
+}
+
+/**
+ * pruss_intc_unmap() - unconfigure the PRUSS INTC
+ * @domain: pru intc domain pointer
+ * @hwirq: the system event number
+ *
+ * Undo whatever was done in pruss_intc_map() for a PRU core.
+ * Mappings are reference counted, so resources are only disabled when there
+ * are no longer any users.
+ */
+static void pruss_intc_unmap(struct pruss_intc_domain *domain, unsigned long hwirq)
+{
+	struct pruss_intc *intc = domain->intc;
+	struct device* dev = intc->irqchip->parent_device;
+	u8 ch, host;
+
+	if (hwirq >= MAX_PRU_SYS_EVENTS)
+		return;
+
+	mutex_lock(&intc->lock);
+
+	ch = intc->event_channel[hwirq].value;
+	host = intc->channel_host[ch].value;
+
+	if (--intc->channel_host[ch].ref_count == 0) {
+		/* disable host interrupts */
+		pruss_intc_write_reg(intc, PRU_INTC_HIDISR, host);
+	}
+
+	if (--intc->event_channel[hwirq].ref_count == 0) {
+		/* disable system events */
+		pruss_intc_write_reg(intc, PRU_INTC_EICR, hwirq);
+		/* clear any pending status */
+		pruss_intc_write_reg(intc, PRU_INTC_SICR, hwirq);
+	}
+
+	if (intc->has_evtsel)
+		intc->evtsel.ref_count--;
+
+	dev_info(dev, "unmapped system_event = %lu channel = %d host = %d\n",
+		 hwirq, ch, host);
+
+	mutex_unlock(&intc->lock);
 }
 
 static void pruss_intc_init(struct pruss_intc *intc)
@@ -198,10 +436,83 @@ static int pruss_intc_irq_set_irqchip_state(struct irq_data *data,
 	return pruss_intc_check_write(intc, PRU_INTC_SICR, data->hwirq);
 }
 
+static int pruss_intc_irq_domain_select(struct irq_domain *d,
+					struct irq_fwspec *fwspec,
+					enum irq_domain_bus_token bus_token)
+{
+	struct pruss_intc_domain *domain = d->host_data;
+	int num_cells = domain->intc->has_evtsel ? 5 : 4;
+	u32 domain_id;
+
+	if (!fwspec || fwspec->fwnode != domain->domain->fwnode)
+		return 0;
+
+	if (bus_token != DOMAIN_BUS_ANY && bus_token != domain->domain->bus_token)
+		return 0;
+
+	if (WARN_ON_ONCE(fwspec->param_count != num_cells))
+		return 0;
+
+	domain_id = fwspec->param[fwspec->param_count - 1];
+	if (domain_id != domain->id)
+		return 0;
+
+	return 1;
+}
+
+static int
+pruss_intc_irq_domain_xlate(struct irq_domain *d, struct device_node *node,
+			    const u32 *intspec, unsigned int intsize,
+			    unsigned long *out_hwirq, unsigned int *out_type)
+{
+	struct pruss_intc_domain *domain = d->host_data;
+	struct pruss_intc *intc = domain->intc;
+	int num_cells = intc->has_evtsel ? 5 : 4;
+	u32 sys_event, channel, host, domain_id;
+	u32 evtsel = 0;
+
+	if (WARN_ON_ONCE(intsize != num_cells))
+		return -EINVAL;
+
+	sys_event = intspec[0];
+	if (sys_event >= MAX_PRU_SYS_EVENTS)
+		return -EINVAL;
+
+	if (intc->has_evtsel)
+		evtsel = intspec[1];
+
+	channel = intspec[intsize - 3];
+	if (channel >= MAX_PRU_CHANNELS)
+		return -EINVAL;
+
+	host = intspec[intsize - 2];
+	if (host >= MAX_PRU_HOST_INT)
+		return -EINVAL;
+
+	domain_id = intspec[intsize - 1];
+	if (domain_id != domain->id)
+		return -EINVAL;
+
+	domain->hwirq_data[sys_event].evtsel = evtsel;
+	domain->hwirq_data[sys_event].channel = channel;
+	domain->hwirq_data[sys_event].host = host;
+
+	*out_hwirq = sys_event;
+	*out_type = IRQ_TYPE_NONE;
+
+	return 0;
+}
+
 static int pruss_intc_irq_domain_map(struct irq_domain *d, unsigned int virq,
 				     irq_hw_number_t hw)
 {
-	struct pruss_intc *intc = d->host_data;
+	struct pruss_intc_domain *domain = d->host_data;
+	struct pruss_intc *intc = domain->intc;
+	int err;
+
+	err = pruss_intc_map(domain, hw);
+	if (err < 0)
+		return err;
 
 	irq_set_chip_data(virq, intc);
 	irq_set_chip_and_handler(virq, intc->irqchip, handle_level_irq);
@@ -211,12 +522,17 @@ static int pruss_intc_irq_domain_map(struct irq_domain *d, unsigned int virq,
 
 static void pruss_intc_irq_domain_unmap(struct irq_domain *d, unsigned int virq)
 {
+	struct pruss_intc_domain *domain = d->host_data;
+	unsigned long hwirq = irqd_to_hwirq(irq_get_irq_data(virq));
+
 	irq_set_chip_and_handler(virq, NULL, NULL);
 	irq_set_chip_data(virq, NULL);
+	pruss_intc_unmap(domain, hwirq);
 }
 
 static const struct irq_domain_ops pruss_intc_irq_domain_ops = {
-	.xlate	= irq_domain_xlate_onecell,
+	.select	= pruss_intc_irq_domain_select,
+	.xlate	= pruss_intc_irq_domain_xlate,
 	.map	= pruss_intc_irq_domain_map,
 	.unmap	= pruss_intc_irq_domain_unmap,
 };
@@ -245,7 +561,8 @@ static void pruss_intc_irq_handler(struct irq_desc *desc)
 	hipir = pruss_intc_read_reg(intc, PRU_INTC_HIPIR(i));
 	while (!(hipir & INTC_HIPIR_NONE_HINT)) {
 		hwirq = hipir & GENMASK(9, 0);
-		virq = irq_linear_revmap(intc->domain, hwirq);
+		virq = irq_linear_revmap(
+			intc->domain[TI_PRUSS_INTC_DOMAIN_MCU].domain, hwirq);
 
 		/*
 		 * NOTE: manually ACK any system events that do not have a
@@ -272,7 +589,8 @@ static int pruss_intc_probe(struct platform_device *pdev)
 	struct pruss_intc *intc;
 	struct resource *res;
 	struct irq_chip *irqchip;
-	int i, irq, count;
+	int i, err, irq, count;
+	u32 num_cells;
 	u8 temp_intr[MAX_NUM_HOST_IRQS] = { 0 };
 
 	intc = devm_kzalloc(dev, sizeof(*intc), GFP_KERNEL);
@@ -323,13 +641,22 @@ static int pruss_intc_probe(struct platform_device *pdev)
 		}
 	}
 
+	err = of_property_read_u32(dev->of_node, "#interrupt-cells", &num_cells);
+	if (!err && num_cells == 5)
+		intc->has_evtsel = true;
+
 	mutex_init(&intc->lock);
+
+	pm_runtime_enable(dev);
+	pm_runtime_get_sync(dev);
 
 	pruss_intc_init(intc);
 
 	irqchip = devm_kzalloc(dev, sizeof(*irqchip), GFP_KERNEL);
-	if (!irqchip)
-		return -ENOMEM;
+	if (!irqchip) {
+		err = -ENOMEM;
+		goto fail_alloc;
+	}
 
 	irqchip->irq_ack = pruss_intc_irq_ack;
 	irqchip->irq_mask = pruss_intc_irq_mask;
@@ -338,14 +665,24 @@ static int pruss_intc_probe(struct platform_device *pdev)
 	irqchip->irq_release_resources = pruss_intc_irq_relres;
 	irqchip->irq_get_irqchip_state = pruss_intc_irq_get_irqchip_state;
 	irqchip->irq_set_irqchip_state = pruss_intc_irq_set_irqchip_state;
+	irqchip->parent_device = dev;
 	irqchip->name = dev_name(dev);
 	intc->irqchip = irqchip;
 
-	/* always 64 events */
-	intc->domain = irq_domain_add_linear(dev->of_node, MAX_PRU_SYS_EVENTS,
-					     &pruss_intc_irq_domain_ops, intc);
-	if (!intc->domain)
-		return -ENOMEM;
+	for (i = 0; i < NUM_TI_PRUSS_INTC_DOMAIN; i++) {
+		intc->domain[i].intc = intc;
+		intc->domain[i].id = i;
+		/* always 64 events */
+		intc->domain[i].domain = irq_domain_add_linear(dev->of_node,
+				MAX_PRU_SYS_EVENTS, &pruss_intc_irq_domain_ops,
+				&intc->domain[i]);
+		if (!intc->domain[i].domain) {
+			while (--i >= 0)
+				irq_domain_remove(intc->domain[i].domain);
+			err = -ENOMEM;
+			goto fail_alloc;
+		}
+	}
 
 	for (i = 0; i < MAX_NUM_HOST_IRQS; i++) {
 		irq = platform_get_irq_byname(pdev, irq_names[i]);
@@ -356,6 +693,7 @@ static int pruss_intc_probe(struct platform_device *pdev)
 
 			dev_err(dev, "platform_get_irq_byname failed for %s : %d\n",
 				irq_names[i], irq);
+			err = irq;
 			goto fail_irq;
 		}
 
@@ -372,13 +710,20 @@ fail_irq:
 			irq_set_chained_handler_and_data(intc->irqs[i], NULL,
 							 NULL);
 	}
-	irq_domain_remove(intc->domain);
-	return irq;
+	for (i = 0; i < NUM_TI_PRUSS_INTC_DOMAIN; i++)
+		irq_domain_remove(intc->domain[i].domain);
+
+fail_alloc:
+	pm_runtime_put(dev);
+	pm_runtime_disable(dev);
+
+	return err;
 }
 
 static int pruss_intc_remove(struct platform_device *pdev)
 {
 	struct pruss_intc *intc = platform_get_drvdata(pdev);
+	struct device *dev = &pdev->dev;
 	unsigned int hwirq;
 	int i;
 
@@ -388,9 +733,15 @@ static int pruss_intc_remove(struct platform_device *pdev)
 							 NULL);
 	}
 
-	for (hwirq = 0; hwirq < MAX_PRU_SYS_EVENTS; hwirq++)
-		irq_dispose_mapping(irq_find_mapping(intc->domain, hwirq));
-	irq_domain_remove(intc->domain);
+	for (i = 0; i < NUM_TI_PRUSS_INTC_DOMAIN; i++) {
+		for (hwirq = 0; hwirq < MAX_PRU_SYS_EVENTS; hwirq++)
+			irq_dispose_mapping(irq_find_mapping(
+					    intc->domain[i].domain, hwirq));
+		irq_domain_remove(intc->domain[i].domain);
+	}
+
+	pm_runtime_put(dev);
+	pm_runtime_disable(dev);
 
 	return 0;
 }
