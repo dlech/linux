@@ -26,3 +26,5 @@ qcom_wcnss_pil-y			+= qcom_wcnss.o
 qcom_wcnss_pil-y			+= qcom_wcnss_iris.o
 obj-$(CONFIG_ST_REMOTEPROC)		+= st_remoteproc.o
 obj-$(CONFIG_ST_SLIM_REMOTEPROC)	+= st_slim_rproc.o
+obj-$(CONFIG_TI_PRU_RPROC)		+= ti_pru_rproc.o
+obj-$(CONFIG_TI_PRU_RPROC)		+= ev3_pru.o
