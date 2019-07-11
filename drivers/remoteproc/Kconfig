@@ -85,6 +85,10 @@ config KEYSTONE_REMOTEPROC
 	  It's safe to say N here if you're not interested in the Keystone
 	  DSPs or just want to use a bare minimum kernel.
 
+config TI_PRU_RPROC
+	tristate "TI PRU rproc"
+	depends on ARCH_DAVINCI_DA8XX
+
 config QCOM_RPROC_COMMON
 	tristate
 

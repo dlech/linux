@@ -532,6 +532,27 @@
 			clocks = <&pll0_auxclk>;
 			status = "disabled";
 		};
+		pru_rproc: remote-processor@30000 {
+			compatible = "simple-bus";
+			ranges = <0x0 0x30000 0x10000>;
+			#address-cells = <1>;
+			#size-cells = <1>;
+
+			pru_intc: interrupt-controller@4000 {
+				compatible = "ti,pruss-intc";
+				reg = <0x4000 0x3000>;
+				interrupts = <3>, <4>, <5>, <6>, <7>, <8>, <9>,
+					     <10>;
+				interrupt-names = "host_intr0", "host_intr1",
+						  "host_intr2", "host_intr3",
+						  "host_intr4", "host_intr5",
+						  "host_intr6", "host_intr7";
+				interrupt-controller;
+				#interrupt-cells = <5>;
+				power-domains = <&psc0 13>;
+			};
+
+		};
 		mmc0: mmc@40000 {
 			compatible = "ti,da830-mmc";
 			reg = <0x40000 0x1000>;
