@@ -400,12 +400,68 @@ static int ti_eqep_direction_read(struct counter_device *counter,
 	return 0;
 }
 
+static int ti_eqep_position_latched_count_read(struct counter_device *counter,
+					       struct counter_count *count,
+					       u64 *value)
+{
+	struct ti_eqep_cnt *priv = counter->priv;
+	u32 qposlat;
+
+	regmap_read(priv->regmap32, QPOSLAT, &qposlat);
+
+	*value = qposlat;
+
+	return 0;
+}
+
+static int ti_eqep_position_capture_latch_mode_read(struct counter_device *counter,
+						    struct counter_count *count,
+						    u32 *value)
+{
+	struct ti_eqep_cnt *priv = counter->priv;
+	u32 qepctl;
+
+	regmap_read(priv->regmap16, QEPCTL, &qepctl);
+	*value = !!(qepctl & QEPCTL_QCLM);
+
+	return 0;
+}
+
+static int ti_eqep_position_capture_latch_mode_write(struct counter_device *counter,
+						     struct counter_count *count,
+						     u32 value)
+{
+	struct ti_eqep_cnt *priv = counter->priv;
+
+	if (value)
+		regmap_set_bits(priv->regmap16, QEPCTL, QEPCTL_QCLM);
+	else
+		regmap_clear_bits(priv->regmap16, QEPCTL, QEPCTL_QCLM);
+
+	return 0;
+}
+
+static const char *const ti_eqep_position_capture_latch_mode_names[] = {
+	"Read count",
+	"Unit timeout",
+};
+
+static DEFINE_COUNTER_ENUM(ti_eqep_position_capture_latch_modes,
+			   ti_eqep_position_capture_latch_mode_names);
+
+
 static struct counter_comp ti_eqep_position_ext[] = {
 	COUNTER_COMP_CEILING(ti_eqep_position_ceiling_read,
 			     ti_eqep_position_ceiling_write),
 	COUNTER_COMP_ENABLE(ti_eqep_position_enable_read,
 			    ti_eqep_position_enable_write),
 	COUNTER_COMP_DIRECTION(ti_eqep_direction_read),
+	COUNTER_COMP_COUNT_U64("latched_count",
+			       ti_eqep_position_latched_count_read, NULL),
+	COUNTER_COMP_COUNT_ENUM("capture_latch_mode",
+				ti_eqep_position_capture_latch_mode_read,
+				ti_eqep_position_capture_latch_mode_write,
+				ti_eqep_position_capture_latch_modes),
 };
 
 static struct counter_signal ti_eqep_signals[] = {
