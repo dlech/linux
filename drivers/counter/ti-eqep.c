@@ -116,6 +116,12 @@
 #define QEPSTS_FIMF		BIT(1)
 #define QEPSTS_PCEF		BIT(0)
 
+#define QCAPCTL_CEN		BIT(15)
+#define QCAPCTL_CCPS_SHIFT	4
+#define QCAPCTL_CCPS		GENMASK(6, 4)
+#define QCAPCTL_UPPS_SHIFT	0
+#define QCAPCTL_UPPS		GENMASK(3, 0)
+
 /* EQEP Inputs */
 enum {
 	TI_EQEP_SIGNAL_QEPA,	/* QEPA/XCLK */
@@ -603,6 +609,137 @@ static int ti_eqep_unit_timer_enable_write(struct counter_device *counter,
 	return 0;
 }
 
+static int
+ti_eqep_edge_capture_unit_prescalar_read(struct counter_device *counter,
+					 u32 *value)
+{
+	struct ti_eqep_cnt *priv = counter->priv;
+	u32 qcapctl;
+
+	regmap_read(priv->regmap16, QCAPCTL, &qcapctl);
+	*value = (qcapctl & QCAPCTL_UPPS) >> QCAPCTL_UPPS_SHIFT;
+
+	return 0;
+}
+
+static int
+ti_eqep_edge_capture_unit_prescalar_write(struct counter_device *counter,
+					  u32 value)
+{
+	struct ti_eqep_cnt *priv = counter->priv;
+
+	regmap_write_bits(priv->regmap16, QCAPCTL, QCAPCTL_UPPS,
+			  value << QCAPCTL_UPPS_SHIFT);
+
+	return 0;
+}
+
+static const char *const ti_eqep_edge_capture_unit_prescalar_values[] = {
+	"1",
+	"2",
+	"4",
+	"8",
+	"16",
+	"32",
+	"64",
+	"128",
+	"256",
+	"512",
+	"1024",
+	"2048",
+};
+
+static DEFINE_COUNTER_ENUM(ti_eqep_edge_capture_unit_prescalar_available,
+			   ti_eqep_edge_capture_unit_prescalar_values);
+
+static int
+ti_eqep_edge_capture_unit_max_period_read(struct counter_device *counter,
+					  u64 *value)
+{
+	struct ti_eqep_cnt *priv = counter->priv;
+	u32 qcapctl;
+	u8 ccps;
+
+	regmap_read(priv->regmap16, QCAPCTL, &qcapctl);
+	ccps = (qcapctl & QCAPCTL_CCPS) >> QCAPCTL_CCPS_SHIFT;
+
+	/* convert timer ticks to nanoseconds */
+	*value = mul_u64_u32_div(USHRT_MAX << ccps, NSEC_PER_SEC,
+				 priv->sysclkout_rate);
+
+	return 0;
+}
+
+static int
+ti_eqep_edge_capture_unit_max_period_write(struct counter_device *counter,
+					   u64 value)
+{
+	struct ti_eqep_cnt *priv = counter->priv;
+	u32 period;
+	u8 ccps;
+
+	/* convert nanoseconds to timer ticks */
+	period = value = mul_u64_u32_div(value, priv->sysclkout_rate, NSEC_PER_SEC);
+	if (period != value)
+		return -ERANGE;
+
+	/* find the smallest divider that will fit the requested period */
+	for (ccps = 0; ccps <= 7; ccps++)
+		if (USHRT_MAX << ccps >= period)
+			break;
+
+	if (ccps > 7)
+		return -EINVAL;
+
+	regmap_write_bits(priv->regmap16, QCAPCTL, QCAPCTL_CCPS,
+			  ccps << QCAPCTL_CCPS_SHIFT);
+
+	return 0;
+}
+
+static int
+ti_eqep_edge_capture_unit_latched_period_read(struct counter_device *counter,
+					      u64 *value)
+{
+	struct ti_eqep_cnt *priv = counter->priv;
+	u32 qcprdlat, qcapctl;
+	u8 ccps;
+
+	regmap_read(priv->regmap16, QCPRDLAT, &qcprdlat);
+	regmap_read(priv->regmap16, QCAPCTL, &qcapctl);
+	ccps = (qcapctl & QCAPCTL_CCPS) >> QCAPCTL_CCPS_SHIFT;
+
+	/* convert timer ticks to nanoseconds */
+	*value = mul_u64_u32_div(qcprdlat << ccps, NSEC_PER_SEC, priv->sysclkout_rate);
+
+	return 0;
+}
+
+static int ti_eqep_edge_capture_unit_enable_read(struct counter_device *counter,
+						 u8 *value)
+{
+	struct ti_eqep_cnt *priv = counter->priv;
+	u32 qcapctl;
+
+	regmap_read(priv->regmap16, QCAPCTL, &qcapctl);
+	*value = !!(qcapctl & QCAPCTL_CEN);
+
+	return 0;
+}
+
+static int ti_eqep_edge_capture_unit_enable_write(struct counter_device *counter,
+						  u8 value)
+{
+	struct ti_eqep_cnt *priv = counter->priv;
+
+	if (value)
+		regmap_set_bits(priv->regmap16, QCAPCTL, QCAPCTL_CEN);
+	else
+		regmap_clear_bits(priv->regmap16, QCAPCTL, QCAPCTL_CEN);
+
+	return 0;
+}
+
 static struct counter_comp ti_eqep_device_ext[] = {
 	COUNTER_COMP_DEVICE_U64("unit_timer_time", ti_eqep_unit_timer_time_read,
 				ti_eqep_unit_timer_time_write),
@@ -612,6 +749,19 @@ static struct counter_comp ti_eqep_device_ext[] = {
 	COUNTER_COMP_DEVICE_BOOL("unit_timer_enable",
 				 ti_eqep_unit_timer_enable_read,
 				 ti_eqep_unit_timer_enable_write),
+	COUNTER_COMP_DEVICE_ENUM("edge_capture_unit_prescalar",
+				 ti_eqep_edge_capture_unit_prescalar_read,
+				 ti_eqep_edge_capture_unit_prescalar_write,
+				 ti_eqep_edge_capture_unit_prescalar_available),
+	COUNTER_COMP_DEVICE_U64("edge_capture_unit_max_period",
+				ti_eqep_edge_capture_unit_max_period_read,
+				ti_eqep_edge_capture_unit_max_period_write),
+	COUNTER_COMP_DEVICE_U64("edge_capture_unit_latched_period",
+				ti_eqep_edge_capture_unit_latched_period_read,
+				NULL),
+	COUNTER_COMP_DEVICE_BOOL("edge_capture_unit_enable",
+				 ti_eqep_edge_capture_unit_enable_read,
+				 ti_eqep_edge_capture_unit_enable_write),
 };
 
 static irqreturn_t ti_eqep_irq_handler(int irq, void *dev_id)
