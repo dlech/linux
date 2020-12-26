@@ -499,6 +499,7 @@ static ssize_t counter_comp_name_show(struct device *dev,
 
 static int counter_name_attr_create(struct device *const dev,
 				    struct counter_attribute_group *const group,
+				    const char *const attr_name,
 				    const char *const name)
 {
 	struct counter_attribute *counter_attr;
@@ -513,7 +514,7 @@ static int counter_name_attr_create(struct device *const dev,
 
 	/* Configure device attribute */
 	sysfs_attr_init(&counter_attr->dev_attr.attr);
-	counter_attr->dev_attr.attr.name = "name";
+	counter_attr->dev_attr.attr.name = attr_name;
 	counter_attr->dev_attr.attr.mode = 0444;
 	counter_attr->dev_attr.show = counter_comp_name_show;
 
@@ -524,6 +525,18 @@ static int counter_name_attr_create(struct device *const dev,
 	return 0;
 }
 
+static int counter_ext_name_attr_create(struct device *const dev,
+	struct counter_attribute_group *const group, const size_t i,
+	const char *const name)
+{
+	const char *attr_name;
+
+	attr_name = devm_kasprintf(dev, GFP_KERNEL, "extension%zu_name", i);
+	if (!attr_name)
+		return -ENOMEM;
+
+	return counter_name_attr_create(dev, group, attr_name, name);
+}
 
 static struct counter_comp counter_signal_comp = {
 	.type = COUNTER_COMP_SIGNAL_LEVEL,
@@ -539,6 +552,7 @@ static int counter_signal_attrs_create(struct counter_device *const counter,
 	int err;
 	struct counter_comp comp;
 	size_t i;
+	struct counter_comp *ext;
 
 	/* Create main Signal attribute */
 	comp = counter_signal_comp;
@@ -548,14 +562,19 @@ static int counter_signal_attrs_create(struct counter_device *const counter,
 		return err;
 
 	/* Create Signal name attribute */
-	err = counter_name_attr_create(dev, group, signal->name);
+	err = counter_name_attr_create(dev, group, "name", signal->name);
 	if (err < 0)
 		return err;
 
 	/* Create an attribute for each extension */
 	for (i = 0; i < signal->num_ext; i++) {
-		err = counter_attr_create(dev, group, signal->ext + i, scope,
-					  signal);
+		ext = signal->ext + i;
+
+		err = counter_attr_create(dev, group, ext, scope, signal);
+		if (err < 0)
+			return err;
+
+		err = counter_ext_name_attr_create(dev, group, i, ext->name);
 		if (err < 0)
 			return err;
 	}
@@ -640,6 +659,7 @@ static int counter_count_attrs_create(struct counter_device *const counter,
 	int err;
 	struct counter_comp comp;
 	size_t i;
+	struct counter_comp *ext;
 
 	/* Create main Count attribute */
 	comp = counter_count_comp;
@@ -650,7 +670,7 @@ static int counter_count_attrs_create(struct counter_device *const counter,
 		return err;
 
 	/* Create Count name attribute */
-	err = counter_name_attr_create(dev, group, count->name);
+	err = counter_name_attr_create(dev, group, "name", count->name);
 	if (err < 0)
 		return err;
 
@@ -664,8 +684,13 @@ static int counter_count_attrs_create(struct counter_device *const counter,
 
 	/* Create an attribute for each extension */
 	for (i = 0; i < count->num_ext; i++) {
-		err = counter_attr_create(dev, group, count->ext + i, scope,
-					  count);
+		ext = count->ext + i;
+
+		err = counter_attr_create(dev, group, ext, scope, count);
+		if (err < 0)
+			return err;
+
+		err = counter_ext_name_attr_create(dev, group, i, ext->name);
 		if (err < 0)
 			return err;
 	}
@@ -729,6 +754,7 @@ static int counter_sysfs_attr_add(struct counter_device *const counter,
 	struct device *const dev = &counter->dev;
 	int err;
 	size_t i;
+	struct counter_comp *ext;
 
 	/* Add Signals sysfs attributes */
 	err = counter_sysfs_signals_add(counter, group);
@@ -743,7 +769,7 @@ static int counter_sysfs_attr_add(struct counter_device *const counter,
 	group += counter->num_counts;
 
 	/* Create name attribute */
-	err = counter_name_attr_create(dev, group, counter->name);
+	err = counter_name_attr_create(dev, group, "name", counter->name);
 	if (err < 0)
 		return err;
 
@@ -761,8 +787,13 @@ static int counter_sysfs_attr_add(struct counter_device *const counter,
 
 	/* Create an attribute for each extension */
 	for (i = 0; i < counter->num_ext; i++) {
-		err = counter_attr_create(dev, group, counter->ext + i, scope,
-					  NULL);
+		ext = counter->ext + i;
+
+		err = counter_attr_create(dev, group, ext, scope, NULL);
+		if (err < 0)
+			return err;
+
+		err = counter_ext_name_attr_create(dev, group, i, ext->name);
 		if (err < 0)
 			return err;
 	}
