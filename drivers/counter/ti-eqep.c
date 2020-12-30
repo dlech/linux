@@ -265,32 +265,6 @@ static int ti_eqep_position_ceiling_write(struct counter_device *counter,
 	return 0;
 }
 
-static int ti_eqep_position_floor_read(struct counter_device *counter,
-				       struct counter_count *count, u64 *floor)
-{
-	struct ti_eqep_cnt *priv = counter->priv;
-	u32 qposinit;
-
-	regmap_read(priv->regmap32, QPOSINIT, &qposinit);
-
-	*floor = qposinit;
-
-	return 0;
-}
-
-static int ti_eqep_position_floor_write(struct counter_device *counter,
-					struct counter_count *count, u64 floor)
-{
-	struct ti_eqep_cnt *priv = counter->priv;
-
-	if (floor != (u32)floor)
-		return -ERANGE;
-
-	regmap_write(priv->regmap32, QPOSINIT, floor);
-
-	return 0;
-}
-
 static int ti_eqep_position_enable_read(struct counter_device *counter,
 					struct counter_count *count, u8 *enable)
 {
@@ -317,8 +291,6 @@ static int ti_eqep_position_enable_write(struct counter_device *counter,
 static struct counter_comp ti_eqep_position_ext[] = {
 	COUNTER_COMP_CEILING(ti_eqep_position_ceiling_read,
 			     ti_eqep_position_ceiling_write),
-	COUNTER_COMP_FLOOR(ti_eqep_position_floor_read,
-			   ti_eqep_position_floor_write),
 	COUNTER_COMP_ENABLE(ti_eqep_position_enable_read,
 			    ti_eqep_position_enable_write),
 };
