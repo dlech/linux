@@ -34,6 +34,7 @@ description: |
 properties:
   compatible:
     enum:
+      - ti,am1806-pru   # for OMAP-L13x/AM18x/DA850 SoCs SoC family
       - ti,am3356-pru   # for AM335x SoC family (AM3356+ SoCs only)
       - ti,am4376-pru   # for AM437x SoC family (AM4376+ SoCs only)
       - ti,am5728-pru   # for AM57xx SoC family
@@ -46,47 +47,75 @@ properties:
       - ti,j721e-tx-pru # for Tx_PRUs in K3 J721E SoC family
 
   reg:
-    items:
-      - description: Address and Size of the PRU Instruction RAM
-      - description: Address and Size of the PRU CTRL sub-module registers
-      - description: Address and Size of the PRU Debug sub-module registers
+    minItems: 2
+    maxItems: 3
 
   reg-names:
-    items:
-      - const: iram
-      - const: control
-      - const: debug
+    minItems: 2
+    maxItems: 3
 
   firmware-name:
     description: |
       Should contain the name of the default firmware image
       file located on the firmware search path.
 
-if:
-  properties:
-    compatible:
-      enum:
-        - ti,am654-rtu
-        - ti,j721e-rtu
-then:
-  properties:
-    $nodename:
-      pattern: "^rtu@[0-9a-f]+$"
-else:
-  if:
-    properties:
-      compatible:
-        enum:
-          - ti,am654-tx-pru
-          - ti,j721e-tx-pru
-  then:
-    properties:
-      $nodename:
-        pattern: "^txpru@[0-9a-f]+"
-  else:
-    properties:
-      $nodename:
-        pattern: "^pru@[0-9a-f]+$"
+allOf:
+  - if:
+      properties:
+        compatible:
+          const: ti,am1806-pru
+    then:
+      properties:
+        reg:
+          maxItems: 2
+          items:
+            - description: Address and Size of the PRU CTRL sub-module registers
+            - description: Address and Size of the PRU Instruction RAM
+        reg-names:
+          maxItems: 2
+          items:
+            - const: control
+            - const: iram
+    else:
+      properties:
+        reg:
+          minItems: 3
+          items:
+            - description: Address and Size of the PRU Instruction RAM
+            - description: Address and Size of the PRU CTRL sub-module registers
+            - description: Address and Size of the PRU Debug sub-module registers
+        reg-names:
+          minItems: 3
+          items:
+            - const: iram
+            - const: control
+            - const: debug
+
+  - if:
+      properties:
+        compatible:
+          enum:
+            - ti,am654-rtu
+            - ti,j721e-rtu
+    then:
+      properties:
+        $nodename:
+          pattern: "^rtu@[0-9a-f]+$"
+    else:
+      if:
+        properties:
+          compatible:
+            enum:
+              - ti,am654-tx-pru
+              - ti,j721e-tx-pru
+      then:
+        properties:
+          $nodename:
+            pattern: "^txpru@[0-9a-f]+"
+      else:
+        properties:
+          $nodename:
+            pattern: "^pru@[0-9a-f]+$"
 
 required:
   - compatible
