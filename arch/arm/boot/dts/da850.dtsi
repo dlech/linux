@@ -532,6 +532,47 @@
 			clocks = <&pll0_auxclk>;
 			status = "disabled";
 		};
+		pruss: pruss@30000 {
+			compatible = "ti,am1806-pruss";
+			reg = <0x30000 0x10000>;
+			ranges = <0x0 0x30000 0x10000>;
+			#address-cells = <1>;
+			#size-cells = <1>;
+			power-domains = <&psc0 13>;
+			status = "disabled";
+
+			pruss_mem: memories@0 {
+				reg = <0x0 0x200>, <0x2000 0x200>;
+				reg-names = "dram0", "dram1";
+			};
+
+			pruss_intc: interrupt-controller@4000 {
+				compatible = "ti,pruss-intc";
+				reg = <0x4000 0x3000>;
+				interrupts = <3 4 5 6 7 8 9 10>;
+				interrupt-names = "host_intr0", "host_intr1",
+						  "host_intr2", "host_intr3",
+						  "host_intr4", "host_intr5",
+						  "host_intr6", "host_intr7";
+				interrupt-controller;
+				#interrupt-cells = <4>;
+				ti,da830-cfgchip = <&cfgchip>;
+			};
+
+			pru0: pru@7000 {
+				compatible = "ti,am1806-pru";
+				reg = <0x7000 0x800>, <0x8000 0x1000>;
+				reg-names = "control", "iram";
+				status = "disabled";
+			};
+
+			pru1: pru@7800 {
+				compatible = "ti,am1806-pru";
+				reg = <0x7800 0x800>, <0xc000 0x1000>;
+				reg-names = "control", "iram";
+				status = "disabled";
+			};
+		};
 		mmc0: mmc@40000 {
 			compatible = "ti,da830-mmc";
 			reg = <0x40000 0x1000>;
