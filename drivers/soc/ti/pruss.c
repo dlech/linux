@@ -24,10 +24,12 @@
  * struct pruss_private_data - PRUSS driver private data
  * @has_no_sharedram: flag to indicate the absence of PRUSS Shared Data RAM
  * @has_core_mux_clock: flag to indicate the presence of PRUSS core clock
+ * @has_cfg: flag to indicate the presence of PRUSS CFG registers
  */
 struct pruss_private_data {
 	bool has_no_sharedram;
 	bool has_core_mux_clock;
+	bool has_cfg;
 };
 
 static void pruss_of_free_clk_provider(void *data)
@@ -239,42 +241,44 @@ static int pruss_probe(struct platform_device *pdev)
 		goto rpm_disable;
 	}
 
-	child = of_get_child_by_name(np, "cfg");
-	if (!child) {
-		dev_err(dev, "%pOF is missing its 'cfg' node\n", child);
-		ret = -ENODEV;
-		goto rpm_put;
-	}
+	if (data->has_cfg) {
+		child = of_get_child_by_name(np, "cfg");
+		if (!child) {
+			dev_err(dev, "%pOF is missing its 'cfg' node\n", child);
+			ret = -ENODEV;
+			goto rpm_put;
+		}
 
-	if (of_address_to_resource(child, 0, &res)) {
-		ret = -ENOMEM;
-		goto node_put;
-	}
+		if (of_address_to_resource(child, 0, &res)) {
+			ret = -ENOMEM;
+			goto node_put;
+		}
 
-	pruss->cfg_base = devm_ioremap(dev, res.start, resource_size(&res));
-	if (!pruss->cfg_base) {
-		ret = -ENOMEM;
-		goto node_put;
-	}
+		pruss->cfg_base = devm_ioremap(dev, res.start, resource_size(&res));
+		if (!pruss->cfg_base) {
+			ret = -ENOMEM;
+			goto node_put;
+		}
 
-	regmap_conf.name = kasprintf(GFP_KERNEL, "%pOFn@%llx", child,
-				     (u64)res.start);
-	regmap_conf.max_register = resource_size(&res) - 4;
+		regmap_conf.name = kasprintf(GFP_KERNEL, "%pOFn@%llx", child,
+					     (u64)res.start);
+		regmap_conf.max_register = resource_size(&res) - 4;
 
-	pruss->cfg_regmap = devm_regmap_init_mmio(dev, pruss->cfg_base,
-						  &regmap_conf);
-	kfree(regmap_conf.name);
-	if (IS_ERR(pruss->cfg_regmap)) {
-		dev_err(dev, "regmap_init_mmio failed for cfg, ret = %ld\n",
-			PTR_ERR(pruss->cfg_regmap));
-		ret = PTR_ERR(pruss->cfg_regmap);
-		goto node_put;
-	}
+		pruss->cfg_regmap = devm_regmap_init_mmio(dev, pruss->cfg_base,
+							  &regmap_conf);
+		kfree(regmap_conf.name);
+		if (IS_ERR(pruss->cfg_regmap)) {
+			dev_err(dev, "regmap_init_mmio failed for cfg, ret = %ld\n",
+				PTR_ERR(pruss->cfg_regmap));
+			ret = PTR_ERR(pruss->cfg_regmap);
+			goto node_put;
+		}
 
-	ret = pruss_clk_init(pruss, child);
-	if (ret) {
-		dev_err(dev, "failed to setup coreclk-mux\n");
-		goto node_put;
+		ret = pruss_clk_init(pruss, child);
+		if (ret) {
+			dev_err(dev, "failed to setup coreclk-mux\n");
+			goto node_put;
+		}
 	}
 
 	ret = devm_of_platform_populate(dev);
@@ -309,19 +313,27 @@ static int pruss_remove(struct platform_device *pdev)
 }
 
 /* instance-specific driver private data */
+static const struct pruss_private_data am18xx_pruss_data = {
+	.has_no_sharedram = true,
+};
+
 static const struct pruss_private_data am437x_pruss1_data = {
 	.has_no_sharedram = false,
+	.has_cfg = true,
 };
 
 static const struct pruss_private_data am437x_pruss0_data = {
 	.has_no_sharedram = true,
+	.has_cfg = true,
 };
 
 static const struct pruss_private_data am65x_j721e_pruss_data = {
 	.has_core_mux_clock = true,
+	.has_cfg = true,
 };
 
 static const struct of_device_id pruss_of_match[] = {
+	{ .compatible = "ti,am1806-pruss", .data = &am18xx_pruss_data, },
 	{ .compatible = "ti,am3356-pruss" },
 	{ .compatible = "ti,am4376-pruss0", .data = &am437x_pruss0_data, },
 	{ .compatible = "ti,am4376-pruss1", .data = &am437x_pruss1_data, },
