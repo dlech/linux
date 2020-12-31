@@ -61,6 +61,7 @@ properties:
 
   compatible:
     enum:
+      - ti,am1806-pruss  # for AM18xx/OMAP-L138 SoC family
       - ti,am3356-pruss  # for AM335x SoC family
       - ti,am4376-pruss0 # for AM437x SoC family and PRUSS unit 0
       - ti,am4376-pruss1 # for AM437x SoC family and PRUSS unit 1
@@ -321,6 +322,7 @@ if:
     compatible:
       contains:
         enum:
+          - ti,am1806-pruss
           - ti,k2g-pruss
           - ti,am654-icssg
           - ti,j721e-icssg
