@@ -16,9 +16,12 @@
 #include <linux/irq.h>
 #include <linux/irqchip/chained_irq.h>
 #include <linux/irqdomain.h>
+#include <linux/mfd/da8xx-cfgchip.h>
+#include <linux/mfd/syscon.h>
 #include <linux/module.h>
 #include <linux/of_device.h>
 #include <linux/platform_device.h>
+#include <linux/regmap.h>
 
 /*
  * Number of host interrupts reaching the main MPU sub-system. Note that this
@@ -93,6 +96,7 @@ struct pruss_intc_match_data {
 
 /**
  * struct pruss_intc - PRUSS interrupt controller structure
+ * @event_select: the bank of events selected by PRUSSEVTSEL (AM18xx/OMAP-L138/DA850 only)
  * @event_channel: current state of system event to channel mappings
  * @channel_host: current state of channel to host mappings
  * @irqs: kernel irq numbers corresponding to PRUSS host interrupts
@@ -101,8 +105,10 @@ struct pruss_intc_match_data {
  * @soc_config: cached PRUSS INTC IP configuration data
  * @dev: PRUSS INTC device pointer
  * @lock: mutex to serialize interrupts mapping
+ * @syscon_regmap: syscon register that contains PRUSSEVTSEL
  */
 struct pruss_intc {
+	struct pruss_intc_map_record event_select;
 	struct pruss_intc_map_record event_channel[MAX_PRU_SYS_EVENTS];
 	struct pruss_intc_map_record channel_host[MAX_PRU_CHANNELS];
 	unsigned int irqs[MAX_NUM_HOST_IRQS];
@@ -111,6 +117,7 @@ struct pruss_intc {
 	const struct pruss_intc_match_data *soc_config;
 	struct device *dev;
 	struct mutex lock; /* PRUSS INTC lock */
+	struct regmap *syscon_regmap;
 };
 
 /**
@@ -178,15 +185,25 @@ static void pruss_intc_update_hmr(struct pruss_intc *intc, u8 ch, u8 host)
 static void pruss_intc_map(struct pruss_intc *intc, unsigned long hwirq)
 {
 	struct device *dev = intc->dev;
-	u8 ch, host, reg_idx;
+	u8 select, ch, host, reg_idx;
 	u32 val;
 
 	mutex_lock(&intc->lock);
 
 	intc->event_channel[hwirq].ref_count++;
 
+	select = intc->event_select.value;
 	ch = intc->event_channel[hwirq].value;
 	host = intc->channel_host[ch].value;
+
+	/* only the first 32 events require PRUSSEVTSEL */
+	if (hwirq < 32) {
+		intc->event_select.ref_count++;
+	}
+	if (intc->event_select.ref_count == 1 && intc->syscon_regmap) {
+		regmap_write_bits(intc->syscon_regmap, CFGCHIP(3),
+				  CFGCHIP3_PRUEVTSEL, select ? ~0 : 0);
+	}
 
 	pruss_intc_update_cmr(intc, hwirq, ch);
 
@@ -204,8 +221,8 @@ static void pruss_intc_map(struct pruss_intc *intc, unsigned long hwirq)
 		pruss_intc_write_reg(intc, PRU_INTC_HIEISR, host);
 	}
 
-	dev_dbg(dev, "mapped system_event = %lu channel = %d host = %d",
-		hwirq, ch, host);
+	dev_dbg(dev, "mapped select = %d system_event = %lu channel = %d host = %d",
+		select, hwirq, ch, host);
 
 	mutex_unlock(&intc->lock);
 }
@@ -249,8 +266,14 @@ static void pruss_intc_unmap(struct pruss_intc *intc, unsigned long hwirq)
 	/* clear the map using reset value 0 */
 	pruss_intc_update_cmr(intc, hwirq, 0);
 
-	dev_dbg(intc->dev, "unmapped system_event = %lu channel = %d host = %d\n",
-		hwirq, ch, host);
+	/* only the first 32 events require PRUSSEVTSEL */
+	if (hwirq < 32) {
+		intc->event_select.ref_count--;
+	}
+
+	dev_dbg(intc->dev,
+		"unmapped select = %d system_event = %lu channel = %d host = %d\n",
+		intc->event_select.value, hwirq, ch, host);
 
 	mutex_unlock(&intc->lock);
 }
@@ -372,13 +395,22 @@ static struct irq_chip pruss_irqchip = {
 	.irq_set_irqchip_state	= pruss_intc_irq_set_irqchip_state,
 };
 
-static int pruss_intc_validate_mapping(struct pruss_intc *intc, int event,
-				       int channel, int host)
+static int pruss_intc_validate_mapping(struct pruss_intc *intc, int select,
+				       int event, int channel, int host)
 {
 	struct device *dev = intc->dev;
 	int ret = 0;
 
 	mutex_lock(&intc->lock);
+
+	/* check if PRUSSEVTSEL is already set - only matters for first 32 events */
+	if (event < 32 && intc->event_select.ref_count > 0 &&
+	    intc->event_select.value != select) {
+		dev_err(dev, "event select %d requested but is already set to %d\n",
+			select, intc->event_select.value);
+		ret = -EBUSY;
+		goto unlock;
+	}
 
 	/* check if sysevent already assigned */
 	if (intc->event_channel[event].ref_count > 0 &&
@@ -398,6 +430,7 @@ static int pruss_intc_validate_mapping(struct pruss_intc *intc, int event,
 		goto unlock;
 	}
 
+	intc->event_select.value = select;
 	intc->event_channel[event].value = channel;
 	intc->channel_host[channel].value = host;
 
@@ -414,30 +447,41 @@ pruss_intc_irq_domain_xlate(struct irq_domain *d, struct device_node *node,
 	struct pruss_intc *intc = d->host_data;
 	struct device *dev = intc->dev;
 	int ret, sys_event, channel, host;
+	int select = 0;
+	int i = 0;
 
 	if (intsize < 3)
 		return -EINVAL;
 
-	sys_event = intspec[0];
+	/* extra PRUSSEVTSEL cell */
+	if (intsize == 4) {
+		select = intspec[i++];
+		if (select < 0 || select > 1) {
+			dev_err(dev, "%d is not valid PRUSSEVTSEL number\n", select);
+			return -EINVAL;
+		}
+	}
+
+	sys_event = intspec[i++];
 	if (sys_event < 0 || sys_event >= intc->soc_config->num_system_events) {
 		dev_err(dev, "%d is not valid event number\n", sys_event);
 		return -EINVAL;
 	}
 
-	channel = intspec[1];
+	channel = intspec[i++];
 	if (channel < 0 || channel >= intc->soc_config->num_host_events) {
 		dev_err(dev, "%d is not valid channel number", channel);
 		return -EINVAL;
 	}
 
-	host = intspec[2];
+	host = intspec[i++];
 	if (host < 0 || host >= intc->soc_config->num_host_events) {
 		dev_err(dev, "%d is not valid host irq number\n", host);
 		return -EINVAL;
 	}
 
 	/* check if requested sys_event was already mapped, if so validate it */
-	ret = pruss_intc_validate_mapping(intc, sys_event, channel, host);
+	ret = pruss_intc_validate_mapping(intc, select, sys_event, channel, host);
 	if (ret)
 		return ret;
 
@@ -524,6 +568,7 @@ static int pruss_intc_probe(struct platform_device *pdev)
 	struct pruss_intc *intc;
 	struct pruss_host_irq_data *host_data;
 	int i, irq, ret;
+	u32 num_interrupt_cells = 0;
 	u8 max_system_events, irqs_reserved = 0;
 
 	data = of_device_get_match_data(dev);
@@ -553,6 +598,16 @@ static int pruss_intc_probe(struct platform_device *pdev)
 	 */
 	if (ret < 0 && ret != -EINVAL)
 		return ret;
+
+	of_property_read_u32(dev->of_node, "#interrupt_cells", &num_interrupt_cells);
+	if (num_interrupt_cells > 3) {
+		intc->syscon_regmap =
+			syscon_regmap_lookup_by_phandle(dev->of_node, "syscon");
+		if (IS_ERR(intc->syscon_regmap)) {
+			dev_err(dev, "failed to get syscon");
+			return PTR_ERR(intc->syscon_regmap);
+		}
+	}
 
 	pruss_intc_init(intc);
 
