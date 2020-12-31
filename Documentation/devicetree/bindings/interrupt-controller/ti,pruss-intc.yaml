@@ -69,7 +69,7 @@ properties:
   interrupt-controller: true
 
   "#interrupt-cells":
-    const: 3
+    enum: [3, 4]
     description: |
       Client users shall use the PRU System event number (the interrupt source
       that the client is interested in) [cell 1], PRU channel [cell 2] and PRU
@@ -78,6 +78,11 @@ properties:
       interrupts through 2 levels of many-to-one mapping i.e. events to channel
       mapping and channels to host interrupts so through this property entire
       mapping is provided.
+
+      OMAP-L13x/AM18x/DA850 SoCs require 4 cells. For events 0 to 31, the
+      extra cell indicates the PRUSSEVTSEL value. For events 32 to 64, this
+      cell is ignored and should be set to 0. This cell is ordered before the
+      cells described above [cell 0].
 
   ti,irqs-reserved:
     $ref: /schemas/types.yaml#/definitions/uint8
@@ -93,6 +98,12 @@ properties:
               "host_intr7" interrupts connected to MPU, and other ICSSG
               instances.
 
+  ti,da830-cfgchip:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description:
+      Phandle to the ti,da830-cfgchip syscon node for accessing PRUSSEVTSEL.
+
+
 required:
   - compatible
   - reg
@@ -101,9 +112,41 @@ required:
   - interrupt-controller
   - "#interrupt-cells"
 
+if:
+  properties:
+    "#interrupt-cells":
+      const: 4
+then:
+  required:
+    - ti,da830-cfgchip
+
 additionalProperties: false
 
 examples:
+  - |
+    /* AM18xx PRUSS */
+    pruss@0 {
+        compatible = "ti,am1806-pruss";
+        reg = <0x0 0x10000>;
+        #address-cells = <1>;
+        #size-cells = <1>;
+        ranges;
+        power-domains = <&psc0 13>;
+
+        interrupt-controller@4000 {
+            compatible = "ti,pruss-intc";
+            reg = <0x4000 0x3000>;
+            interrupts = <3 4 5 6 7 8 9 10>;
+            interrupt-names = "host_intr0", "host_intr1",
+                              "host_intr2", "host_intr3",
+                              "host_intr4", "host_intr5",
+                              "host_intr6", "host_intr7";
+            interrupt-controller;
+            #interrupt-cells = <4>;
+            ti,da830-cfgchip = <&cfgchip>;
+        };
+    };
+
   - |
     /* AM33xx PRU-ICSS */
     pruss: pruss@0 {
