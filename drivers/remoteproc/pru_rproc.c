@@ -91,12 +91,14 @@ enum pru_type {
  * @pru0_iram_offset: used to identify PRU core 0
  * @pru1_iram_offset: used to identify PRU core 1
  * @is_k3: flag used to identify the need for special load handling
+ * @has_debug_reg: flag used to identify the presence of debug registers
  */
 struct pru_private_data {
 	enum pru_type type;
 	u16 pru0_iram_offset;
 	u16 pru1_iram_offset;
 	unsigned int is_k3 : 1;
+	unsigned int has_debug_reg: 1;
 };
 
 /**
@@ -356,6 +358,9 @@ EXPORT_SYMBOL_GPL(pru_rproc_set_ctable);
 
 static inline u32 pru_debug_read_reg(struct pru_rproc *pru, unsigned int reg)
 {
+	if (!pru->data->has_debug_reg) {
+		return -ENODEV;
+	}
 	return readl_relaxed(pru->mem_regions[PRU_IOMEM_DEBUG].va + reg);
 }
 
@@ -386,6 +391,10 @@ static int regs_show(struct seq_file *s, void *data)
 		   pru_control_read_reg(pru, PRU_CTRL_CTPPR0));
 	seq_printf(s, "CTPPR1    := 0x%08x\n",
 		   pru_control_read_reg(pru, PRU_CTRL_CTPPR1));
+
+	if (!pru->data->has_debug_reg) {
+		return 0;
+	}
 
 	seq_puts(s, "=============== Debug Registers ===============\n");
 	pru_is_running = pru_control_read_reg(pru, PRU_CTRL_CTRL) &
@@ -975,6 +984,10 @@ static int pru_rproc_probe(struct platform_device *pdev)
 	mutex_init(&pru->lock);
 
 	for (i = 0; i < ARRAY_SIZE(mem_names); i++) {
+		if (i == PRU_IOMEM_DEBUG && !data->has_debug_reg) {
+			continue;
+		}
+
 		res = platform_get_resource_byname(pdev, IORESOURCE_MEM,
 						   mem_names[i]);
 		pru->mem_regions[i].va = devm_ioremap_resource(dev, res);
@@ -1020,11 +1033,17 @@ static int pru_rproc_remove(struct platform_device *pdev)
 
 	return 0;
 }
+static const struct pru_private_data am1806_pru_data = {
+	.type = PRU_TYPE_PRU,
+	.pru0_iram_offset = 0x8000,
+	.pru1_iram_offset = 0xc000,
+};
 
 static const struct pru_private_data pru_data = {
 	.type = PRU_TYPE_PRU,
 	.pru0_iram_offset = 0x4000,
 	.pru1_iram_offset = 0x8000,
+	.has_debug_reg = true,
 };
 
 static const struct pru_private_data k3_pru_data = {
@@ -1032,6 +1051,7 @@ static const struct pru_private_data k3_pru_data = {
 	.pru0_iram_offset = 0x4000,
 	.pru1_iram_offset = 0x8000,
 	.is_k3 = 1,
+	.has_debug_reg = true,
 };
 
 static const struct pru_private_data k3_rtu_data = {
@@ -1039,6 +1059,7 @@ static const struct pru_private_data k3_rtu_data = {
 	.pru0_iram_offset = 0x4000,
 	.pru1_iram_offset = 0x6000,
 	.is_k3 = 1,
+	.has_debug_reg = true,
 };
 
 static const struct pru_private_data k3_tx_pru_data = {
@@ -1046,9 +1067,11 @@ static const struct pru_private_data k3_tx_pru_data = {
 	.pru0_iram_offset = 0xa000,
 	.pru1_iram_offset = 0xc000,
 	.is_k3 = 1,
+	.has_debug_reg = true,
 };
 
 static const struct of_device_id pru_rproc_match[] = {
+	{ .compatible = "ti,am1806-pru",	.data = &am1806_pru_data },
 	{ .compatible = "ti,am3356-pru",	.data = &pru_data },
 	{ .compatible = "ti,am4376-pru",	.data = &pru_data },
 	{ .compatible = "ti,am5728-pru",	.data = &pru_data },
