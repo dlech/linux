@@ -334,6 +334,32 @@ static void pruss_intc_irq_unmask(struct irq_data *data)
 	pruss_intc_write_reg(intc, PRU_INTC_EISR, hwirq);
 }
 
+static int pruss_intc_irq_set_type(struct irq_data *data, unsigned int type)
+{
+	struct pruss_intc *intc = irq_data_get_irq_chip_data(data);
+	u32 reg, bit, val;
+
+	if (type & IRQ_TYPE_LEVEL_MASK) {
+		/* polarity register */
+		reg = PRU_INTC_SIPR(data->hwirq / 32);
+		bit = BIT(data->hwirq % 32);
+		val = pruss_intc_read_reg(intc, reg);
+
+		/*
+		 * This check also ensures that IRQ_TYPE_DEFAULT will result
+		 * in setting the level to high.
+		 */
+		if (type & IRQ_TYPE_LEVEL_HIGH)
+			val |= bit;
+		else
+			val &= ~bit;
+
+		pruss_intc_write_reg(intc, reg, val);
+	}
+
+	return 0;
+}
+
 static int pruss_intc_irq_reqres(struct irq_data *data)
 {
 	if (!try_module_get(THIS_MODULE))
@@ -389,6 +415,7 @@ static struct irq_chip pruss_irqchip = {
 	.irq_ack		= pruss_intc_irq_ack,
 	.irq_mask		= pruss_intc_irq_mask,
 	.irq_unmask		= pruss_intc_irq_unmask,
+	.irq_set_type		= pruss_intc_irq_set_type,
 	.irq_request_resources	= pruss_intc_irq_reqres,
 	.irq_release_resources	= pruss_intc_irq_relres,
 	.irq_get_irqchip_state	= pruss_intc_irq_get_irqchip_state,
