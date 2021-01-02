@@ -26,86 +26,6 @@
 #include "csl/cslr_prucore.h"
 #include "pru.h"
 
-/************************************************************
-* Local Function Declarations                               *
-************************************************************/
-
-// Load the specified PRU with code
-int pru_load(u8 pruNum, u32 * pruCode, u32 codeSizeInWords,
-		arm_pru_iomap * pru_arm_iomap)
-{
-	u32 *pruIram;
-	u32 i;
-
-	if (pruNum > CSL_PRUCORE_1)
-		return -EINVAL;
-
-	pruIram = pru_arm_iomap->pru_iram_io_addr[pruNum];
-
-	pru_enable(pruNum, pru_arm_iomap);
-
-	// Copy dMAX code to its instruction RAM
-	for (i = 0; i < codeSizeInWords; i++) {
-		pruIram[i] = pruCode[i];
-	}
-
-	return 0;
-}
-
-int pru_run(u8 pruNum, arm_pru_iomap * pru_arm_iomap)
-{
-	CSL_PrucoreRegsOvly hPru;
-
-	if (pruNum > CSL_PRUCORE_1)
-		return -EINVAL;
-
-	hPru = pru_arm_iomap->pru_ctrl_io_addr[pruNum];
-
-	// Enable dMAX, let it execute the code we just copied
-	CSL_FINST(hPru->CONTROL, PRUCORE_CONTROL_COUNTENABLE, ENABLE);
-	CSL_FINST(hPru->CONTROL, PRUCORE_CONTROL_ENABLE, ENABLE);
-
-	return 0;
-}
-
-int pru_disable(u8 pruNum, arm_pru_iomap * pru_arm_iomap)
-{
-	CSL_PrucoreRegsOvly hPru;
-	unsigned int delay_cnt;
-
-	if (pruNum > CSL_PRUCORE_1)
-		return -EINVAL;
-
-	hPru = pru_arm_iomap->pru_ctrl_io_addr[pruNum];
-
-	CSL_FINST(hPru->CONTROL, PRUCORE_CONTROL_COUNTENABLE, DISABLE);
-
-	for (delay_cnt = 0x10000; delay_cnt > 0; delay_cnt--)
-		CSL_FINST(hPru->CONTROL, PRUCORE_CONTROL_ENABLE, DISABLE);
-
-	for (delay_cnt = 0x10000; delay_cnt > 0; delay_cnt--)
-		hPru->CONTROL = CSL_PRUCORE_CONTROL_RESETVAL;
-
-	return 0;
-}
-
-int pru_enable(u8 pruNum, arm_pru_iomap * pru_arm_iomap)
-{
-	CSL_PrucoreRegsOvly hPru;
-
-	if (pruNum > CSL_PRUCORE_1)
-		return -EINVAL;
-
-	hPru = pru_arm_iomap->pru_ctrl_io_addr[pruNum];
-	hPru->CONTROL = CSL_PRUCORE_CONTROL_RESETVAL;
-
-	return 0;
-}
-
-/***********************************************************
-* End file                                                 *
-***********************************************************/
-
 /** ********************************************************************************************************
  * \brief    pru_ram_write_data()       Download the data into data RAM of PRU0 or PRU1 of OMAP L138.
  *
@@ -214,4 +134,3 @@ short pru_ram_read_data_4byte(unsigned int u32offset,
 
 	return 0;
 }
-

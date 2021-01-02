@@ -21,7 +21,9 @@
  */
 
 #include <linux/interrupt.h>
+#include <linux/pruss.h>
 #include <linux/string.h>
+#include <linux/remoteproc.h>
 #include <linux/types.h>
 
 #include "suart_api.h"
@@ -41,13 +43,12 @@ static void pru_set_rx_tx_mode(u32 pru_mode, u32 pruNum);
 #if (PRU_ACTIVE == BOTH_PRU)
 void pru_set_ram_data (arm_pru_iomap * arm_iomap_pru)
 {
-
-    PRU_SUART_RegsOvly pru_suart_regs = arm_iomap_pru->pru_dram_io_addr[PRU_NUM0];
+    PRU_SUART_RegsOvly pru_suart_regs = arm_iomap_pru->pru_dram_io_addr[PRUSS_PRU0];
     unsigned int * pu32SrCtlAddr = (unsigned int *) ((unsigned int)
 					arm_iomap_pru->mcasp_io_addr + 0x180);
     pru_suart_tx_cntx_priv * pru_suart_tx_priv = NULL;
     pru_suart_rx_cntx_priv * pru_suart_rx_priv = NULL;
-    unsigned char *pu32_pru_ram_base = arm_iomap_pru->pru_dram_io_addr[PRU_NUM0];
+    unsigned char *pu32_pru_ram_base = arm_iomap_pru->pru_dram_io_addr[PRUSS_PRU0];
 	
     /* ***************************** RX PRU - 0  **************************************** */
 
@@ -204,8 +205,8 @@ void pru_set_ram_data (arm_pru_iomap * arm_iomap_pru)
 
 
     /* ****************************** PRU1 RAM BASE ADDR ******************************** */
-    pru_suart_regs = arm_iomap_pru->pru_dram_io_addr[PRU_NUM1];
-    pu32_pru_ram_base = arm_iomap_pru->pru_dram_io_addr[PRU_NUM1];
+    pru_suart_regs = arm_iomap_pru->pru_dram_io_addr[PRUSS_PRU1];
+    pu32_pru_ram_base = arm_iomap_pru->pru_dram_io_addr[PRUSS_PRU1];
 
     /* ***************************** TX PRU - 1  **************************************** */
     /* Channel 0 context information */
@@ -361,13 +362,12 @@ void pru_set_ram_data (arm_pru_iomap * arm_iomap_pru)
 #else
 void pru_set_ram_data (arm_pru_iomap * arm_iomap_pru)
 {
-    
-    PRU_SUART_RegsOvly pru_suart_regs = arm_iomap_pru->pru_dram_io_addr[PRU_NUM0];
+    PRU_SUART_RegsOvly pru_suart_regs = arm_iomap_pru->pru_dram_io_addr[PRUSS_PRU0];
     unsigned int * pu32SrCtlAddr = (unsigned int *) ((unsigned int) 
 					arm_iomap_pru->mcasp_io_addr + 0x180);	
     pru_suart_tx_cntx_priv * pru_suart_tx_priv = NULL;			
     pru_suart_rx_cntx_priv * pru_suart_rx_priv = NULL;
-    unsigned char *pu32_pru_ram_base = arm_iomap_pru->pru_dram_io_addr[PRU_NUM0];
+    unsigned char *pu32_pru_ram_base = arm_iomap_pru->pru_dram_io_addr[PRUSS_PRU0];
 							
     /* ***************************** UART 0  **************************************** */
 
@@ -528,20 +528,17 @@ void pru_set_ram_data (arm_pru_iomap * arm_iomap_pru)
 /*
  * suart Initialization routine 
  */
-short pru_softuart_init(unsigned int txBaudValue,
+int pru_softuart_init(unsigned int txBaudValue,
 			unsigned int rxBaudValue,
 			unsigned int oversampling,
-			const unsigned char *pru_suart_emu_code,
-			unsigned int fw_size, arm_pru_iomap * arm_iomap_pru)
+			arm_pru_iomap * arm_iomap_pru)
 {
 	unsigned int omapl_addr;
-	short status = PRU_SUART_SUCCESS;
 	short idx;
+	int err;
 
-	if ((PRU0_MODE == PRU_MODE_RX_TX_BOTH) && (PRU1_MODE == PRU_MODE_RX_TX_BOTH))
-	{
-		return PRU_SUART_FAILURE;
-	}
+	if (PRU0_MODE == PRU_MODE_RX_TX_BOTH && PRU1_MODE == PRU_MODE_RX_TX_BOTH)
+		return -EINVAL;
 
 	pru_arm_iomap = *arm_iomap_pru;
 
@@ -550,39 +547,32 @@ short pru_softuart_init(unsigned int txBaudValue,
 	suart_mcasp_config(omapl_addr, txBaudValue, rxBaudValue, oversampling,
 			   arm_iomap_pru);	
 
-	pru_enable(0, arm_iomap_pru);
+	memset(pru_arm_iomap.pru_dram_io_addr[PRUSS_PRU0], 0, 512);
 #if (!(PRU1_MODE == PRU_MODE_INVALID))
-	pru_enable(1, arm_iomap_pru);
-#endif
-
-	memset(pru_arm_iomap.pru_dram_io_addr[PRU_NUM0], 0, 512);
-#if (!(PRU1_MODE == PRU_MODE_INVALID))
-	memset(pru_arm_iomap.pru_dram_io_addr[PRU_NUM1], 0, 512);
-#endif
-
-	pru_load(PRU_NUM0, (unsigned int *)pru_suart_emu_code,
-		 (fw_size / sizeof(unsigned int)), arm_iomap_pru);
-#if (!(PRU1_MODE == PRU_MODE_INVALID))
-	pru_load(PRU_NUM1, (unsigned int *)pru_suart_emu_code,
-		 (fw_size / sizeof(unsigned int)), arm_iomap_pru);
+	memset(pru_arm_iomap.pru_dram_io_addr[PRUSS_PRU1], 0, 512);
 #endif
 
 	suart_set_pru_id(0);
-
 #if (!(PRU1_MODE == PRU_MODE_INVALID))
 	suart_set_pru_id(1);
 #endif
 
-	pru_set_rx_tx_mode(PRU0_MODE, PRU_NUM0);
+	pru_set_rx_tx_mode(PRU0_MODE, PRUSS_PRU0);
 #if (!(PRU1_MODE == PRU_MODE_INVALID))
-	pru_set_rx_tx_mode(PRU1_MODE, PRU_NUM1);
+	pru_set_rx_tx_mode(PRU1_MODE, PRUSS_PRU1);
 #endif
 	
 	pru_set_ram_data (arm_iomap_pru);
 
-	pru_run(PRU_NUM0, arm_iomap_pru);
+	err = rproc_boot(arm_iomap_pru->pru[PRUSS_PRU0]);
+	if (err < 0)
+		return err;
 #if (!(PRU1_MODE == PRU_MODE_INVALID))
-	pru_run(PRU_NUM1, arm_iomap_pru); 
+	err = rproc_boot(arm_iomap_pru->pru[PRUSS_PRU1]);
+	if (err < 0) {
+		rproc_shutdown(arm_iomap_pru->pru[PRUSS_PRU0]);
+		return err;
+	}
 #endif
 
 	/* Initialize gUartStatuTable */
@@ -590,7 +580,7 @@ short pru_softuart_init(unsigned int txBaudValue,
 		gUartStatuTable[idx] = ePRU_SUART_UART_FREE;
 	}
 
-	return status;
+	return 0;
 }
 
 static void pru_set_rx_tx_mode(u32 pru_mode, u32 pruNum)
@@ -598,12 +588,12 @@ static void pru_set_rx_tx_mode(u32 pru_mode, u32 pruNum)
 
 	unsigned int pruOffset;
 
-	if (pruNum == PRU_NUM0) 
+	if (pruNum == PRUSS_PRU0) 
 	{
 		/* PRU0 */
 		pruOffset = PRU_SUART_PRU0_RX_TX_MODE;
 	} 
-	else if (pruNum == PRU_NUM1) {
+	else if (pruNum == PRUSS_PRU1) {
 		/* PRU1 */
 		pruOffset = PRU_SUART_PRU1_RX_TX_MODE;
 	}
@@ -631,15 +621,15 @@ void pru_set_fifo_timeout(u32 timeout)
 
 void pru_mcasp_deinit (void)
 {
-	suart_mcasp_reset (&pru_arm_iomap);
+	suart_mcasp_reset(&pru_arm_iomap);
 }
 
 short pru_softuart_deinit(void)
 {
 #if (!(PRU1_MODE == PRU_MODE_INVALID))
-	pru_disable(PRU_NUM1, &pru_arm_iomap);	
+	rproc_shutdown(pru_arm_iomap.pru[PRUSS_PRU1]);
 #endif
-	pru_disable(PRU_NUM0, &pru_arm_iomap);	
+	rproc_shutdown(pru_arm_iomap.pru[PRUSS_PRU0]);
 
 	return PRU_SUART_SUCCESS;
 }
@@ -2187,9 +2177,9 @@ short suart_arm_to_pru_intr(unsigned short uartNum)
 
 	if ((PRU0_MODE == PRU_MODE_RX_TX_BOTH) || (PRU1_MODE == PRU_MODE_RX_TX_BOTH)) {
 		if ((uartNum > 0) && (uartNum <= 4))
-			pruNum = PRU_NUM0;
+			pruNum = PRUSS_PRU0;
 		else if ((uartNum > 4) && (uartNum <= 8))
-			pruNum = PRU_NUM1;
+			pruNum = PRUSS_PRU1;
 		else
 			return SUART_INVALID_UART_NUM;
 	}
