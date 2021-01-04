@@ -46,15 +46,6 @@
 #define PRU_DEBUG_GPREG(x)	(0x0000 + (x) * 4)
 #define PRU_DEBUG_CT_REG(x)	(0x0080 + (x) * 4)
 
-/* PRU/RTU/Tx_PRU Core IRAM address masks */
-#define PRU_IRAM_ADDR_MASK	0x3ffff
-#define PRU0_IRAM_ADDR_MASK	0x34000
-#define PRU1_IRAM_ADDR_MASK	0x38000
-#define RTU0_IRAM_ADDR_MASK	0x4000
-#define RTU1_IRAM_ADDR_MASK	0x6000
-#define TX_PRU0_IRAM_ADDR_MASK	0xa000
-#define TX_PRU1_IRAM_ADDR_MASK	0xc000
-
 /* PRU device addresses for various type of PRU RAMs */
 #define PRU_IRAM_DA	0	/* Instruction RAM */
 #define PRU_PDRAM_DA	0	/* Primary Data RAM */
@@ -96,10 +87,14 @@ enum pru_type {
 /**
  * struct pru_private_data - device data for a PRU core
  * @type: type of the PRU core (PRU, RTU, Tx_PRU)
+ * @pru0_iram_offset: used to identify PRU core 0
+ * @pru1_iram_offset: used to identify PRU core 1
  * @is_k3: flag used to identify the need for special load handling
  */
 struct pru_private_data {
 	enum pru_type type;
+	u16 pru0_iram_offset;
+	u16 pru1_iram_offset;
 	unsigned int is_k3 : 1;
 };
 
@@ -693,33 +688,21 @@ static int pru_rproc_parse_fw(struct rproc *rproc, const struct firmware *fw)
 }
 
 /*
- * Compute PRU id based on the IRAM addresses. The PRU IRAMs are
+ * Compute PRU id based on the last 16 bits of IRAM addresses. The PRU IRAMs are
  * always at a particular offset within the PRUSS address space.
  */
 static int pru_rproc_set_id(struct pru_rproc *pru)
 {
-	int ret = 0;
+	u16 offset = pru->mem_regions[PRU_IOMEM_IRAM].pa;
 
-	switch (pru->mem_regions[PRU_IOMEM_IRAM].pa & PRU_IRAM_ADDR_MASK) {
-	case TX_PRU0_IRAM_ADDR_MASK:
-		fallthrough;
-	case RTU0_IRAM_ADDR_MASK:
-		fallthrough;
-	case PRU0_IRAM_ADDR_MASK:
+	if (offset == pru->data->pru0_iram_offset)
 		pru->id = 0;
-		break;
-	case TX_PRU1_IRAM_ADDR_MASK:
-		fallthrough;
-	case RTU1_IRAM_ADDR_MASK:
-		fallthrough;
-	case PRU1_IRAM_ADDR_MASK:
+	else if (offset == pru->data->pru1_iram_offset)
 		pru->id = 1;
-		break;
-	default:
-		ret = -EINVAL;
-	}
+	else
+		return -EINVAL;
 
-	return ret;
+	return 0;
 }
 
 static int pru_rproc_probe(struct platform_device *pdev)
@@ -825,20 +808,28 @@ static int pru_rproc_remove(struct platform_device *pdev)
 
 static const struct pru_private_data pru_data = {
 	.type = PRU_TYPE_PRU,
+	.pru0_iram_offset = 0x4000,
+	.pru1_iram_offset = 0x8000,
 };
 
 static const struct pru_private_data k3_pru_data = {
 	.type = PRU_TYPE_PRU,
+	.pru0_iram_offset = 0x4000,
+	.pru1_iram_offset = 0x8000,
 	.is_k3 = 1,
 };
 
 static const struct pru_private_data k3_rtu_data = {
 	.type = PRU_TYPE_RTU,
+	.pru0_iram_offset = 0x4000,
+	.pru1_iram_offset = 0x6000,
 	.is_k3 = 1,
 };
 
 static const struct pru_private_data k3_tx_pru_data = {
 	.type = PRU_TYPE_TX_PRU,
+	.pru0_iram_offset = 0xa000,
+	.pru1_iram_offset = 0xc000,
 	.is_k3 = 1,
 };
 
