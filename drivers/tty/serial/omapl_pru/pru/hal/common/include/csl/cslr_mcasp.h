@@ -26,7 +26,6 @@
 
 #include <linux/types.h>
 
-#include <csl/cslr.h>
 
 /**************************************************************************\
 * AFIFO Data-IN Register Overlay Structure (buffer block)

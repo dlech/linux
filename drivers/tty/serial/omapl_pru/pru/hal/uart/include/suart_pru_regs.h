@@ -25,19 +25,11 @@
  *====================
  */
 
-#define PRU_DATARAM_BASE_ADDR			(0x01C30000u)
-
 #define PRU0_DATARAM0_OFFSET			(0x0000u)
 /** PRU0 DATA RAM base address */
 
 #define PRU0_DATARAM1_OFFSET			(0x2000u)
 /** PRU0 DATA RAM base address */
-
-#define PRU_SUART_DATARAM0_BASE			(PRU_DATARAM_BASE_ADDR + PRU0_DATARAM0_OFFSET)
-/** PRU1 DATA RAM base address */
-
-#define PRU_SUART_DATARAM1_BASE			(PRU_DATARAM_BASE_ADDR + PRU0_DATARAM0_OFFSET)
-/** PRU1 DATA RAM base address */
 
 #define PRU_SUART_PRU0_CH0_OFFSET		(0x0000)
 /** Channel 0 */
@@ -156,56 +148,5 @@
 #define PRU_SUART_CH_TXRXSTATUS_OFFSET		0x06
 #define PRU_SUART_CH_TXRXDATA_OFFSET		0x08
 #define PRU_SUART_CH_BYTESDONECNTR_OFFSET	0x0C
-
-/* SUART Event Numbers macros */
-#define PRU_SUART0_TX_EVT			34
-#define PRU_SUART0_RX_EVT			35
-#define PRU_SUART1_TX_EVT			36
-#define PRU_SUART1_RX_EVT			37
-#define PRU_SUART2_TX_EVT			38
-#define PRU_SUART2_RX_EVT			39
-#define PRU_SUART3_TX_EVT			40
-#define PRU_SUART3_RX_EVT			41
-#define PRU_SUART4_TX_EVT			42
-#define PRU_SUART4_RX_EVT			43
-#define PRU_SUART5_TX_EVT			44
-#define PRU_SUART5_RX_EVT			45
-#define PRU_SUART6_TX_EVT			46
-#define PRU_SUART6_RX_EVT			47
-#define PRU_SUART7_TX_EVT			48
-#define PRU_SUART7_RX_EVT			49
-
-#define PRU_SUART0_TX_EVT_BIT			BIT(2)
-#define PRU_SUART0_RX_EVT_BIT			BIT(3)
-#define PRU_SUART1_TX_EVT_BIT			BIT(4)
-#define PRU_SUART1_RX_EVT_BIT			BIT(5)
-#define PRU_SUART2_TX_EVT_BIT			BIT(6)
-#define PRU_SUART2_RX_EVT_BIT			BIT(7)
-#define PRU_SUART3_TX_EVT_BIT			BIT(8)
-#define PRU_SUART3_RX_EVT_BIT			BIT(9)
-#define PRU_SUART4_TX_EVT_BIT			BIT(10)
-#define PRU_SUART4_RX_EVT_BIT			BIT(11)
-#define PRU_SUART5_TX_EVT_BIT			BIT(12)
-#define PRU_SUART5_RX_EVT_BIT			BIT(13)
-#define PRU_SUART6_TX_EVT_BIT			BIT(14)
-#define PRU_SUART6_RX_EVT_BIT			BIT(15)
-#define PRU_SUART7_TX_EVT_BIT			BIT(16)
-#define PRU_SUART7_RX_EVT_BIT			BIT(17)
-
-/**
- * \brief One line description of the structure
- *
- *  Detailed description of the structure
- */
-	typedef struct {
-		unsigned short CHn_Ctrl;/**< UART number (Range 1 to 16) */
-		unsigned short CHn_Config1;
-					  /**< Type of the UART i.e., Full UART, Half UART */
-		unsigned short CHn_Config2;
-				      /**< Soft UART Channel for Transmission */
-		unsigned short CHn_TXRXStatus;
-					 /**< Soft UART Channel for Reception */
-		unsigned int CHn_TXRXData;/**< Status of the UART */
-	} suart_struct_pru_regs;
 
 #endif
