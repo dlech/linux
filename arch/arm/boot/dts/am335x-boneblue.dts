@@ -265,6 +265,42 @@
 			AM33XX_PADCONF(AM335X_PIN_GPMC_AD13, PIN_INPUT, MUX_MODE4)		/* (R12) gpmc_ad13.eQEP2B_in */
 		>;
 	};
+
+	/* Motor 1 */
+	motor1_pins: pinmux_motor1_pins {
+		pinctrl-single,pins = <
+			AM33XX_PADCONF(AM335X_PIN_GPMC_CSN3, PIN_OUTPUT, MUX_MODE7)		/* (T13) gpmc_csn3.gpio2[0] - MDIR_1A */
+			AM33XX_PADCONF(AM335X_PIN_GPMC_WPN, PIN_OUTPUT, MUX_MODE7)		/* (U17) gpmc_wpn.gpio0[31] - MDIR_1B */
+			AM33XX_PADCONF(AM335X_PIN_GPMC_A2, PIN_OUTPUT, MUX_MODE6)		/* (U14) gpmc_a2.ehrpwm1A */
+		>;
+	};
+
+	/* Motor 2 */
+	motor2_pins: pinmux_motor2_pins {
+		pinctrl-single,pins = <
+			AM33XX_PADCONF(AM335X_PIN_GPMC_A0, PIN_OUTPUT, MUX_MODE7)		/* (R13) gpmc_a0.gpio1[16] - MDIR_2A */
+			AM33XX_PADCONF(AM335X_PIN_LCD_DATA14, PIN_OUTPUT, MUX_MODE7)		/* (V4) lcd_data14.gpio0[10] - MDIR_2B */
+			AM33XX_PADCONF(AM335X_PIN_GPMC_A3, PIN_OUTPUT, MUX_MODE6)		/* (T14) gpmc_a3.ehrpwm1B */
+		>;
+	};
+
+	/* Motor 3 */
+	motor3_pins: pinmux_motor3_pins {
+		pinctrl-single,pins = <
+			AM33XX_PADCONF(AM335X_PIN_LCD_DATA3, PIN_OUTPUT, MUX_MODE7)		/* (R4) lcd_data3.gpio2[9] - MDIR_3A */
+			AM33XX_PADCONF(AM335X_PIN_LCD_DATA2, PIN_OUTPUT, MUX_MODE7)		/* (R3) lcd_data2.gpio2[8] - MDIR_3B */
+			AM33XX_PADCONF(AM335X_PIN_GPMC_AD8, PIN_OUTPUT, MUX_MODE4)		/* (U10) gpmc_ad8.ehrpwm2A */
+		>;
+	};
+
+	/* Motor 4 */
+	motor4_pins: pinmux_motor4_pins {
+		pinctrl-single,pins = <
+			AM33XX_PADCONF(AM335X_PIN_LCD_DATA0, PIN_OUTPUT, MUX_MODE7)		/* (R1) lcd_data0.gpio2[6] - MDIR_4A */
+			AM33XX_PADCONF(AM335X_PIN_LCD_DATA1, PIN_OUTPUT, MUX_MODE7)		/* (R2) lcd_data1.gpio2[8] - MDIR_4B */
+			AM33XX_PADCONF(AM335X_PIN_GPMC_AD9, PIN_OUTPUT, MUX_MODE4)		/* (U10) gpmc_ad9.ehrpwm2B */
+		>;
+	};
 };
 
 &uart0 {
@@ -599,6 +635,12 @@
 	status = "okay";
 };
 
+&ehrpwm1 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&motor1_pins>, <&motor2_pins>;
+	status = "okay";
+};
+
 &eqep1 {
 	pinctrl-names = "default";
 	pinctrl-0 = <&eqep1_pins>;
@@ -606,6 +648,12 @@
 };
 
 &epwmss2 {
+	status = "okay";
+};
+
+&ehrpwm2 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&motor3_pins>, <&motor4_pins>;
 	status = "okay";
 };
 
