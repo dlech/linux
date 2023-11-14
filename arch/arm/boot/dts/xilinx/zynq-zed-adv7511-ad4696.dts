@@ -1,0 +1,142 @@
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * Analog Devices EVAL-AD4696FMCZ
+ * https://www.analog.com/en/products/ad4696.html
+ *
+ * hdl_project: <ad469x/zed>
+ * board_revision: <?>
+ *
+ * Copyright (C) 2024 Analog Devices Inc.
+ */
+/dts-v1/;
+
+#include <dt-bindings/dma/axi-dmac.h>
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/interrupt-controller/irq.h>
+#include <dt-bindings/iio/adc/adi,ad4695.h>
+
+#include "zynq-zed.dtsi"
+#include "zynq-zed-adv7511.dtsi"
+
+/ {
+	eval_u3: eval-board-u3-regulator {
+		compatible = "regulator-fixed";
+		regulator-name = "EVAL ADR4550 5.0V REFERENCE (U3)";
+		regulator-min-microvolt = <5000000>;
+		regulator-max-microvolt = <5000000>;
+		regulator-always-on;
+	};
+
+	eval_u5: eval-board-u5-regulator {
+		compatible = "regulator-fixed";
+		regulator-name = "EVAL 12V/5V,-3.3V/-2.5V DUAL-LDO (U5)";
+		regulator-always-on;
+	};
+
+	eval_u6: eval-board-u6-regulator {
+		compatible = "regulator-fixed";
+		regulator-name = "EVAL 5V/1.8V LDO (U6)";
+		regulator-always-on;
+	};
+
+	eval_a8: eval-board-a8-voltage-divider {
+		compatible = "regulator-fixed";
+		regulator-name = "EVAL VREF/2 DIVIDER CIRCUIT (A8)";
+		regulator-min-microvolt = <2500000>;
+		regulator-max-microvolt = <2500000>;
+		regulator-always-on;
+	};
+
+	signal_gen_neg: signal-generator-negative {
+		compatible = "regulator-fixed";
+		regulator-name = "Signal generator negative output";
+		regulator-min-microvolt = <2500000>;
+		regulator-max-microvolt = <2500000>;
+		regulator-always-on;
+	};
+};
+
+&fpga_axi {
+	adc_trigger: pwm@44b00000 {
+		compatible = "adi,axi-pwmgen-2.00.a";
+		reg = <0x44b00000 0x1000>;
+		#pwm-cells = <2>;
+		clocks = <&spi_clk>;
+	};
+
+	rx_dma: rx-dmac@44a30000 {
+		compatible = "adi,axi-dmac-1.00.a";
+		reg = <0x44a30000 0x1000>;
+		#dma-cells = <1>;
+		interrupts = <0 57 IRQ_TYPE_LEVEL_HIGH>;
+		clocks = <&clkc 15>;
+	};
+
+	spi_clk: clock-controller@44a70000 {
+		compatible = "adi,axi-clkgen-2.00.a";
+		reg = <0x44a70000 0x1000>;
+		#clock-cells = <0>;
+		clocks = <&clkc 15>, <&clkc 15>;
+		clock-names = "clkin1", "s_axi_aclk";
+		clock-output-names = "spi_clk";
+
+		/* Set to 2x max SCLK. */
+		assigned-clocks = <&spi_clk>;
+		assigned-clock-rates = <160000000>;
+	};
+
+	axi_spi_engine_0: spi@44a00000 {
+		compatible = "adi,axi-spi-engine-1.00.a";
+		reg = <0x44a00000 0x1000>;
+		interrupt-parent = <&intc>;
+		interrupts = <0 56 IRQ_TYPE_LEVEL_HIGH>;
+		clocks = <&clkc 15>, <&spi_clk>;
+		clock-names = "s_axi_aclk", "spi_clk";
+
+		dmas = <&rx_dma 0>;
+		dma-names = "offload0-rx";
+		/* 0 = BUSY, 0 = GP0 */
+		trigger-sources = <&ad4696
+				   AD4695_TRIGGER_EVENT_BUSY
+				   AD4695_TRIGGER_PIN_GP0>;
+
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		ad4696: adc@0 {
+			compatible = "adi,ad4696";
+			reg = <0>;
+			spi-max-frequency = <80000000>;
+			spi-cpha;
+			spi-cpol;
+			avdd-supply = <&eval_u5>;
+			ldo-in-supply = <&eval_u5>;
+			vio-supply = <&eval_u6>;
+			ref-supply = <&eval_u3>;
+			/* Not default: requires changing JP6 to A */
+			com-supply = <&eval_a8>;
+			in1-supply = <&signal_gen_neg>;
+			/* default sample rate 10kHz = 100k ns */
+			pwms = <&adc_trigger 0 100000>;
+			cnv-gpios = <&gpio0 88 GPIO_ACTIVE_HIGH>;
+			reset-gpios = <&gpio0 86 GPIO_ACTIVE_LOW>;
+
+			#trigger-source-cells = <2>;
+
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			channel@0 {
+				reg = <0>;
+				common-mode-channel = <1>;
+				bipolar;
+			};
+
+			channel@3 {
+				reg = <3>;
+				common-mode-channel = <AD4695_COMMON_MODE_COM>;
+				bipolar;
+			};
+		};
+	};
+};
