@@ -88,7 +88,10 @@ struct ad7380_chip_info {
 	.type = IIO_VOLTAGE,					\
 	.info_mask_separate = BIT(IIO_CHAN_INFO_RAW) |		\
 		((diff) ? 0 : BIT(IIO_CHAN_INFO_OFFSET)),	\
-	.info_mask_shared_by_type = BIT(IIO_CHAN_INFO_SCALE),	\
+	.info_mask_shared_by_type = BIT(IIO_CHAN_INFO_SCALE) |	\
+		BIT(IIO_CHAN_INFO_OVERSAMPLING_RATIO),		\
+	.info_mask_shared_by_type_available =			\
+		BIT(IIO_CHAN_INFO_OVERSAMPLING_RATIO),		\
 	.indexed = 1,						\
 	.differential = (diff),					\
 	.channel = (diff) ? (2 * (index)) : (index),		\
@@ -154,6 +157,16 @@ static const struct ad7380_timing_specs ad7380_timing = {
 
 static const struct ad7380_timing_specs ad7380_4_timing = {
 	.t_csh_ns = 20,
+};
+
+/*
+ * Available oversampling ratios. The indices correspond
+ * with the bit value expected by the chip.
+ * The available ratios depend on the averaging mode,
+ * only normal averaging is supported for now
+ */
+static const int ad7380_normal_average_oversampling_ratios[] = {
+	1, 2, 4, 8, 16, 32,
 };
 
 static const struct ad7380_chip_info ad7380_chip_info = {
@@ -231,6 +244,7 @@ static const struct ad7380_chip_info ad7384_4_chip_info = {
 struct ad7380_state {
 	const struct ad7380_chip_info *chip_info;
 	struct spi_device *spi;
+	unsigned int oversampling_ratio;
 	struct regmap *regmap;
 	unsigned int vref_mv;
 	unsigned int vcm_mv[MAX_NUM_CHANNELS];
@@ -386,6 +400,12 @@ static int ad7380_read_direct(struct ad7380_state *st,
 	};
 	int ret;
 
+	/*
+	 * In normal average oversampling we need to wait for multiple conversions to be done
+	 */
+	if (st->oversampling_ratio > 1)
+		xfers[0].delay.value = T_CONVERT_NS + 500 * st->oversampling_ratio;
+
 	ret = spi_sync_transfer(st->spi, xfers, ARRAY_SIZE(xfers));
 	if (ret < 0)
 		return ret;
@@ -428,6 +448,91 @@ static int ad7380_read_raw(struct iio_dev *indio_dev,
 			/ st->vref_mv;
 
 		return IIO_VAL_INT;
+	case IIO_CHAN_INFO_OVERSAMPLING_RATIO:
+		*val = st->oversampling_ratio;
+
+		return IIO_VAL_INT;
+	default:
+		return -EINVAL;
+	}
+}
+
+static int ad7380_read_avail(struct iio_dev *indio_dev,
+			     struct iio_chan_spec const *chan,
+			     const int **vals, int *type, int *length,
+			     long mask)
+{
+	switch (mask) {
+	case IIO_CHAN_INFO_OVERSAMPLING_RATIO:
+		*vals = ad7380_normal_average_oversampling_ratios;
+		*length = ARRAY_SIZE(ad7380_normal_average_oversampling_ratios);
+		*type = IIO_VAL_INT;
+
+		return IIO_AVAIL_LIST;
+	default:
+		return -EINVAL;
+	}
+}
+
+/**
+ * check_osr - Check the oversampling ratio
+ * @available_ratio: available ratios's array
+ * @size: size of the available_ratio array
+ * ratio: ratio to check
+ *
+ * Check if ratio is present in @available_ratio. Check for exact match.
+ * @available_ratio is an array of the available ratios (depending on the oversampling mode).
+ * The indices must correspond with the bit value expected by the chip.
+ */
+static inline int check_osr(const int *available_ratio, int size, int ratio)
+{
+	int i;
+
+	for (i = 0; i < size; i++) {
+		if (ratio == available_ratio[i])
+			return i;
+	}
+
+	return -EINVAL;
+}
+
+static int ad7380_write_raw(struct iio_dev *indio_dev,
+			    struct iio_chan_spec const *chan, int val,
+			    int val2, long mask)
+{
+	struct ad7380_state *st = iio_priv(indio_dev);
+	int ret, osr;
+
+	switch (mask) {
+	case IIO_CHAN_INFO_OVERSAMPLING_RATIO:
+		osr = check_osr(ad7380_normal_average_oversampling_ratios,
+				ARRAY_SIZE(ad7380_normal_average_oversampling_ratios),
+				val);
+
+		if (osr < 0)
+			return osr;
+
+		iio_device_claim_direct_scoped(return -EBUSY, indio_dev) {
+			ret = regmap_update_bits(st->regmap, AD7380_REG_ADDR_CONFIG1,
+						 AD7380_CONFIG1_OSR,
+						 FIELD_PREP(AD7380_CONFIG1_OSR, osr));
+
+			if (ret)
+				return ret;
+
+			st->oversampling_ratio = val;
+
+			/*
+			 * Perform a soft reset.
+			 * This will flush the oversampling block and FIFO but will
+			 * maintain the content of the configurable registers.
+			 */
+			ret = regmap_update_bits(st->regmap, AD7380_REG_ADDR_CONFIG2,
+						 AD7380_CONFIG2_RESET,
+						 FIELD_PREP(AD7380_CONFIG2_RESET,
+							    AD7380_CONFIG2_RESET_SOFT));
+		}
+		return 0;
 	default:
 		return -EINVAL;
 	}
@@ -435,6 +540,8 @@ static int ad7380_read_raw(struct iio_dev *indio_dev,
 
 static const struct iio_info ad7380_info = {
 	.read_raw = &ad7380_read_raw,
+	.read_avail = &ad7380_read_avail,
+	.write_raw = &ad7380_write_raw,
 	.debugfs_reg_access = &ad7380_debugfs_reg_access,
 };
 
@@ -457,6 +564,12 @@ static int ad7380_init(struct ad7380_state *st, struct regulator *vref)
 					    vref ? 1 : 0));
 	if (ret < 0)
 		return ret;
+
+	/* Disable oversampling by default.
+	 * This is the default value after reset,
+	 * so just initialize internal data
+	 */
+	st->oversampling_ratio = 1;
 
 	/* SPI 1-wire mode */
 	return regmap_update_bits(st->regmap, AD7380_REG_ADDR_CONFIG2,
