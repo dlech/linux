@@ -1,0 +1,38 @@
+What: /sys/bus/iio/devices/iio:deviceX/oversampling_mode
+KernelVersion: 6.9
+Contact: Michael Hennerich <michael.hennerich@analog.com>
+Description:
+    Writing this attribute sets the oversampling average mode.
+    Reading it, shows the configured mode.
+    Available modes can be displayed using the oversampling_mode_available
+    attribute.
+    When writing this attribute to change the oversampling mode, this will
+    have the following side effects:
+
+      - soft reset the ADC to flush the oversampling block and FIFO
+
+      - the available oversampling ratios depend on the oversampling mode
+        configured so to avoid misconfiguration, changing the mode will disable
+        the oversampling by setting the ratio to 1.
+
+      - the list of available ratios (displayed by reading the
+        oversampling_ratio_available attribute) will be updated when changing
+        the oversampling mode.
+
+What: /sys/bus/iio/devices/iio:deviceX/oversampling_mode_available
+KernelVersion: 6.9
+Contact: Michael Hennerich <michael.hennerich@analog.com>
+Description:
+    Display the available oversampling average modes. The two available modes
+    are "normal" and "rolling" where "normal" average mode is the default one.
+
+      - normal averaging involves taking a number of samples, adding them
+        together, and dividing the result by the number of samples taken.
+        This result is then output from the device. The sample data is cleared
+        when the process completes. Because we need more samples to output a
+        value, the data output rate decrease with the oversampling ratio.
+
+      - rolling oversampling mode uses a first in, first out (FIFO) buffer of
+        the most recent samples in the averaging calculation, allowing the ADC
+        throughput rate and output data rate to stay the same, since we only need
+        to take only one sample for each new conversion.

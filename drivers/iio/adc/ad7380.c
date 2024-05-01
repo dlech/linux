@@ -51,6 +51,8 @@
 #define AD7380_REG_ADDR_ALERT_HIGH_TH	0x5
 
 #define AD7380_CONFIG1_OS_MODE		BIT(9)
+#define OS_MODE_NORMAL_AVERAGE		0
+#define OS_MODE_ROLLING_AVERAGE		1
 #define AD7380_CONFIG1_OSR		GENMASK(8, 6)
 #define AD7380_CONFIG1_CRC_W		BIT(5)
 #define AD7380_CONFIG1_CRC_R		BIT(4)
@@ -160,13 +162,24 @@ static const struct ad7380_timing_specs ad7380_4_timing = {
 };
 
 /*
+ * Available oversampling modes.
+ */
+static const char * const ad7380_oversampling_average_modes[] = {
+	[OS_MODE_NORMAL_AVERAGE]	= "normal",
+	[OS_MODE_ROLLING_AVERAGE]	= "rolling",
+};
+
+/*
  * Available oversampling ratios. The indices correspond
  * with the bit value expected by the chip.
- * The available ratios depend on the averaging mode,
- * only normal averaging is supported for now
+ * The available ratios depend on the averaging mode.
  */
 static const int ad7380_normal_average_oversampling_ratios[] = {
 	1, 2, 4, 8, 16, 32,
+};
+
+static const int ad7380_rolling_average_oversampling_ratios[] = {
+	1, 2, 4, 8,
 };
 
 static const struct ad7380_chip_info ad7380_chip_info = {
@@ -244,6 +257,7 @@ static const struct ad7380_chip_info ad7384_4_chip_info = {
 struct ad7380_state {
 	const struct ad7380_chip_info *chip_info;
 	struct spi_device *spi;
+	unsigned int oversampling_mode;
 	unsigned int oversampling_ratio;
 	struct regmap *regmap;
 	unsigned int vref_mv;
@@ -403,7 +417,7 @@ static int ad7380_read_direct(struct ad7380_state *st,
 	/*
 	 * In normal average oversampling we need to wait for multiple conversions to be done
 	 */
-	if (st->oversampling_ratio > 1)
+	if (st->oversampling_mode == OS_MODE_NORMAL_AVERAGE && st->oversampling_ratio > 1)
 		xfers[0].delay.value = T_CONVERT_NS + 500 * st->oversampling_ratio;
 
 	ret = spi_sync_transfer(st->spi, xfers, ARRAY_SIZE(xfers));
@@ -462,10 +476,22 @@ static int ad7380_read_avail(struct iio_dev *indio_dev,
 			     const int **vals, int *type, int *length,
 			     long mask)
 {
+	struct ad7380_state *st = iio_priv(indio_dev);
+
 	switch (mask) {
 	case IIO_CHAN_INFO_OVERSAMPLING_RATIO:
-		*vals = ad7380_normal_average_oversampling_ratios;
-		*length = ARRAY_SIZE(ad7380_normal_average_oversampling_ratios);
+		switch (st->oversampling_mode) {
+		case OS_MODE_NORMAL_AVERAGE:
+			*vals = ad7380_normal_average_oversampling_ratios;
+			*length = ARRAY_SIZE(ad7380_normal_average_oversampling_ratios);
+			break;
+		case OS_MODE_ROLLING_AVERAGE:
+			*vals = ad7380_rolling_average_oversampling_ratios;
+			*length = ARRAY_SIZE(ad7380_rolling_average_oversampling_ratios);
+			break;
+		default:
+			return -EINVAL;
+		}
 		*type = IIO_VAL_INT;
 
 		return IIO_AVAIL_LIST;
@@ -505,9 +531,20 @@ static int ad7380_write_raw(struct iio_dev *indio_dev,
 
 	switch (mask) {
 	case IIO_CHAN_INFO_OVERSAMPLING_RATIO:
-		osr = check_osr(ad7380_normal_average_oversampling_ratios,
-				ARRAY_SIZE(ad7380_normal_average_oversampling_ratios),
-				val);
+		switch (st->oversampling_mode) {
+		case OS_MODE_NORMAL_AVERAGE:
+			osr = check_osr(ad7380_normal_average_oversampling_ratios,
+					ARRAY_SIZE(ad7380_normal_average_oversampling_ratios),
+					val);
+			break;
+		case OS_MODE_ROLLING_AVERAGE:
+			osr = check_osr(ad7380_rolling_average_oversampling_ratios,
+					ARRAY_SIZE(ad7380_rolling_average_oversampling_ratios),
+					val);
+			break;
+		default:
+			return -EINVAL;
+		}
 
 		if (osr < 0)
 			return osr;
@@ -538,7 +575,96 @@ static int ad7380_write_raw(struct iio_dev *indio_dev,
 	}
 }
 
+static ssize_t oversampling_mode_show(struct device *dev,
+				      struct device_attribute *attr, char *buf)
+{
+	struct ad7380_state *st = iio_priv(dev_to_iio_dev(dev));
+	unsigned int os_mode;
+
+	os_mode = st->oversampling_mode;
+
+	return sysfs_emit(buf, "%s\n", ad7380_oversampling_average_modes[os_mode]);
+}
+
+static ssize_t oversampling_mode_store(struct device *dev,
+				       struct device_attribute *attr,
+				       const char *buf, size_t len)
+{
+	struct iio_dev *indio_dev = dev_to_iio_dev(dev);
+	struct ad7380_state *st = iio_priv(indio_dev);
+	int os_mode, ret;
+
+	ret = sysfs_match_string(ad7380_oversampling_average_modes, buf);
+	if (ret < 0)
+		return ret;
+
+	os_mode = ret;
+
+	iio_device_claim_direct_scoped(return -EBUSY, indio_dev) {
+		ret = regmap_update_bits(st->regmap, AD7380_REG_ADDR_CONFIG1,
+					 AD7380_CONFIG1_OS_MODE,
+					 FIELD_PREP(AD7380_CONFIG1_OS_MODE, os_mode));
+
+		if (ret)
+			return  ret;
+
+		st->oversampling_mode = os_mode;
+
+		/*
+		 * Oversampling ratio depends on oversampling mode, to avoid
+		 * misconfiguration when changing oversampling mode,
+		 * disable oversampling by setting OSR to 0.
+		 */
+		ret = regmap_update_bits(st->regmap, AD7380_REG_ADDR_CONFIG1,
+					 AD7380_CONFIG1_OSR, FIELD_PREP(AD7380_CONFIG1_OSR, 0));
+
+		if (ret)
+			return ret;
+
+		st->oversampling_ratio = 1;
+
+		/*
+		 * Perform a soft reset.
+		 * This will flush the oversampling block and FIFO but will
+		 * maintain the content of the configurable registers.
+		 */
+		ret = regmap_update_bits(st->regmap, AD7380_REG_ADDR_CONFIG2,
+					 AD7380_CONFIG2_RESET,
+					 FIELD_PREP(AD7380_CONFIG2_RESET,
+						    AD7380_CONFIG2_RESET_SOFT));
+	}
+	return ret ?: len;
+}
+
+static ssize_t oversampling_mode_available_show(struct device *dev,
+						struct device_attribute *attr, char *buf)
+{
+	int i;
+	size_t len = 0;
+
+	for (i = 0; i < ARRAY_SIZE(ad7380_oversampling_average_modes); i++)
+		len += sysfs_emit_at(buf, len, "%s ", ad7380_oversampling_average_modes[i]);
+
+	buf[len - 1] = '\n';
+
+	return len;
+}
+
+static IIO_DEVICE_ATTR_RW(oversampling_mode, 0);
+static IIO_DEVICE_ATTR_RO(oversampling_mode_available, 0);
+
+static struct attribute *ad7380_attributes[] = {
+	&iio_dev_attr_oversampling_mode.dev_attr.attr,
+	&iio_dev_attr_oversampling_mode_available.dev_attr.attr,
+	NULL
+};
+
+static const struct attribute_group ad7380_attribute_group = {
+	.attrs = ad7380_attributes,
+};
+
 static const struct iio_info ad7380_info = {
+	.attrs = &ad7380_attribute_group,
 	.read_raw = &ad7380_read_raw,
 	.read_avail = &ad7380_read_avail,
 	.write_raw = &ad7380_write_raw,
@@ -569,6 +695,7 @@ static int ad7380_init(struct ad7380_state *st, struct regulator *vref)
 	 * This is the default value after reset,
 	 * so just initialize internal data
 	 */
+	st->oversampling_mode = OS_MODE_NORMAL_AVERAGE;
 	st->oversampling_ratio = 1;
 
 	/* SPI 1-wire mode */
