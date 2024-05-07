@@ -89,14 +89,42 @@ struct ad7380_chip_info {
 	const struct ad7380_timing_specs *timing_specs;
 };
 
-/*
- * realbits/storagebits cannot be dynamically changed, so in order to
- * support the resolution boost (additional 2  bits of resolution)
- * we need to set realbits/storagebits to the maximum value i.e :
- *   - realbits = 16 + 2 = 18, and storagebits = 32 for 16-bits chips
- *   - realbits = 14 + 2 = 16, and storagebits = 16 for 14-bits chips
- * We need to adjust the scale depending on resolution boost status
- */
+/* scan type for 14-bit chips. */
+static const struct iio_scan_type ad7380_scan_type_14[] = {
+	{
+		/* normal mode */
+		.sign = 's',
+		.realbits = 14,
+		.storagebits = 16,
+		.endianness = IIO_CPU,
+	},
+	{
+		/* resolution boost mode */
+		.sign = 's',
+		.realbits = 16,
+		.storagebits = 16,
+		.endianness = IIO_CPU,
+	},
+};
+
+/* scan type for 16-bit chips. */
+static const struct iio_scan_type ad7380_scan_type_16[] = {
+	{
+		/* normal mode */
+		.sign = 's',
+		.realbits = 16,
+		.storagebits = 16,
+		.endianness = IIO_CPU,
+	},
+	{
+		/* resolution boost mode */
+		.sign = 's',
+		.realbits = 18,
+		.storagebits = 32,
+		.endianness = IIO_CPU,
+	},
+};
+
 #define AD7380_CHANNEL(index, bits, diff) {			\
 	.type = IIO_VOLTAGE,					\
 	.info_mask_separate = BIT(IIO_CHAN_INFO_RAW) |		\
@@ -111,12 +139,9 @@ struct ad7380_chip_info {
 	.channel = (diff) ? (2 * (index)) : (index),		\
 	.channel2 = (diff) ? (2 * (index) + 1) : 0,		\
 	.scan_index = (index),					\
-	.scan_type = {						\
-		.sign = 's',					\
-		.realbits = (bits) + 2,				\
-		.storagebits = ((bits) + 2 > 16) ? 32 : 16,	\
-		.endianness = IIO_CPU,				\
-	},							\
+	.has_ext_scan_type = 1,					\
+	.ext_scan_type = ad7380_scan_type_##bits,		\
+	.num_ext_scan_type = ARRAY_SIZE(ad7380_scan_type_##bits),\
 }
 
 #define DEFINE_AD7380_2_CHANNEL(name, bits, diff)	\
@@ -376,66 +401,61 @@ static int ad7380_debugfs_reg_access(struct iio_dev *indio_dev, u32 reg,
 	unreachable();
 }
 
-static int ad7380_prepare_spi_xfer(struct ad7380_state *st, struct spi_transfer *xfer)
+/*
+ * Reads one set of samples from the device. This is a simultaneous sampling
+ * chip, so all channels are always read at the same time.
+ *
+ * On successful return, the raw data is stored in st->scan_data.raw.
+ */
+static int ad7380_read_one_sample(struct ad7380_state *st,
+				  const struct iio_scan_type *scan_type)
 {
-	int bits_per_word;
+	struct spi_transfer xfers[2] = {
+		/* toggle CS (no data xfer) to trigger a conversion */
+		{
+			.speed_hz = AD7380_REG_WR_SPEED_HZ,
+			.bits_per_word = scan_type->realbits,
+			.delay = {
+				.value = T_CONVERT_NS,
+				.unit = SPI_DELAY_UNIT_NSECS,
+			},
+			.cs_change = 1,
+			.cs_change_delay = {
+				.value = st->chip_info->timing_specs->t_csh_ns,
+				.unit = SPI_DELAY_UNIT_NSECS,
+			},
+		},
+		{
+			.rx_buf = &st->scan_data.raw,
+			.len = BITS_TO_BYTES(scan_type->storagebits) *
+						(st->chip_info->num_channels - 1),
+			.bits_per_word = scan_type->realbits,
+		},
+	};
 
-	memset(xfer, 0, sizeof(*xfer));
+	/*
+	 * In normal average oversampling we need to wait for multiple conversions to be done
+	 */
+	if (st->oversampling_mode == OS_MODE_NORMAL_AVERAGE && st->oversampling_ratio > 1)
+		xfers[0].delay.value = T_CONVERT_NS + 500 * st->oversampling_ratio;
 
-	xfer->rx_buf = &st->scan_data.raw;
-
-	if (st->resolution_boost_enable == RESOLUTION_BOOST_ENABLE)
-		bits_per_word = st->chip_info->channels[0].scan_type.realbits;
-	else
-		bits_per_word = st->chip_info->channels[0].scan_type.realbits - 2;
-
-	xfer->bits_per_word = bits_per_word;
-
-	xfer->len = (st->chip_info->num_channels - 1) * BITS_TO_BYTES(bits_per_word);
-
-	return bits_per_word;
+	return spi_sync_transfer(st->spi, xfers, ARRAY_SIZE(xfers));
 }
 
 static irqreturn_t ad7380_trigger_handler(int irq, void *p)
 {
 	struct iio_poll_func *pf = p;
 	struct iio_dev *indio_dev = pf->indio_dev;
+	const struct iio_chan_spec *chan = &indio_dev->channels[0];
+	const struct iio_scan_type *scan_type =
+		iio_get_current_scan_type(indio_dev, chan);
 	struct ad7380_state *st = iio_priv(indio_dev);
-	struct spi_transfer xfer;
-	int bits_per_word, realbits, i, ret;
+	int ret;
 
-	realbits = st->chip_info->channels[0].scan_type.realbits;
-	bits_per_word = ad7380_prepare_spi_xfer(st, &xfer);
 
-	ret = spi_sync_transfer(st->spi, &xfer, 1);
+	ret = ad7380_read_one_sample(st, scan_type);
 	if (ret)
 		goto out;
-
-	/*
-	 * If bits_per_word == realbits (resolution boost enabled), we don't
-	 * need to manipulate the raw data, otherwise we may need to fix things
-	 * up a bit to fit the scan_type specs
-	 */
-	if (bits_per_word < realbits) {
-		if (realbits > 16 && bits_per_word <= 16) {
-			/*
-			 * Here realbits > 16 so storagebits is 32 and bits_per_word is <= 16
-			 * so we need to sign extend u16 to u32 using reverse order to
-			 * avoid writing over union data
-			 */
-			for (i = st->chip_info->num_channels - 2; i >= 0; i--)
-				st->scan_data.raw.u32[i] = sign_extend32(st->scan_data.raw.u16[i],
-									 bits_per_word - 1);
-		} else if (bits_per_word < 16) {
-			/*
-			 * Here realbits <= 16 so storagebits is 16.
-			 * We only need to sign extend only if bits_per_word is < 16
-			 */
-			for (i = 0; i < st->chip_info->num_channels - 1; i++)
-				st->scan_data.raw.u16[i] = sign_extend32(st->scan_data.raw.u16[i],
-									 bits_per_word - 1);
-		}
-	}
 
 	iio_push_to_buffers_with_timestamp(indio_dev, &st->scan_data,
 					   pf->timestamp);
@@ -447,47 +467,21 @@ out:
 }
 
 static int ad7380_read_direct(struct ad7380_state *st,
-			      struct iio_chan_spec const *chan, int *val)
+			      struct iio_chan_spec const *chan,
+			      const struct iio_scan_type *scan_type,
+			      int *val)
 {
-	struct spi_transfer xfers[2] = {
-		/* toggle CS (no data xfer) to trigger a conversion */
-		{
-			.speed_hz = AD7380_REG_WR_SPEED_HZ,
-			.bits_per_word = chan->scan_type.realbits,
-			.delay = {
-				.value = T_CONVERT_NS,
-				.unit = SPI_DELAY_UNIT_NSECS,
-			},
-			.cs_change = 1,
-			.cs_change_delay = {
-				.value = st->chip_info->timing_specs->t_csh_ns,
-				.unit = SPI_DELAY_UNIT_NSECS,
-			},
-		},
-		/* then read all channels, it will be filled by ad7380_prepare_spi_xfer */
-		{
-		},
-	};
-	int bits_per_word, ret;
+	int ret;
 
-	/*
-	 * In normal average oversampling we need to wait for multiple conversions to be done
-	 */
-	if (st->oversampling_mode == OS_MODE_NORMAL_AVERAGE && st->oversampling_ratio > 1)
-		xfers[0].delay.value = T_CONVERT_NS + 500 * st->oversampling_ratio;
-
-	bits_per_word = ad7380_prepare_spi_xfer(st, &xfers[1]);
-
-	ret = spi_sync_transfer(st->spi, xfers, ARRAY_SIZE(xfers));
-	if (ret < 0)
+	ret = ad7380_read_one_sample(st, scan_type);
+	if (ret)
 		return ret;
-
-	if (bits_per_word > 16)
+	if (scan_type->storagebits > 16)
 		*val = sign_extend32(st->scan_data.raw.u32[chan->scan_index],
-				     bits_per_word - 1);
+				     scan_type->realbits - 1);
 	else
 		*val = sign_extend32(st->scan_data.raw.u16[chan->scan_index],
-				     bits_per_word - 1);
+				     scan_type->realbits - 1);
 
 	return IIO_VAL_INT;
 }
@@ -496,18 +490,14 @@ static int ad7380_read_raw(struct iio_dev *indio_dev,
 			   struct iio_chan_spec const *chan,
 			   int *val, int *val2, long info)
 {
+	const struct iio_scan_type *scan_type =
+		iio_get_current_scan_type(indio_dev, chan);
 	struct ad7380_state *st = iio_priv(indio_dev);
-	int realbits;
-
-	if (st->resolution_boost_enable == RESOLUTION_BOOST_ENABLE)
-		realbits = chan->scan_type.realbits;
-	else
-		realbits = chan->scan_type.realbits - 2;
 
 	switch (info) {
 	case IIO_CHAN_INFO_RAW:
 		iio_device_claim_direct_scoped(return -EBUSY, indio_dev) {
-			return ad7380_read_direct(st, chan, val);
+			return ad7380_read_direct(st, chan, scan_type, val);
 		}
 		unreachable();
 	case IIO_CHAN_INFO_SCALE:
@@ -520,7 +510,7 @@ static int ad7380_read_raw(struct iio_dev *indio_dev,
 		 * According to IIO ABI, offset is applied before scale,
 		 * so offset is: vcm_mv / scale
 		 */
-		*val = st->vcm_mv[chan->channel] * (1 << realbits)
+		*val = st->vcm_mv[chan->channel] * (1 << scan_type->realbits)
 			/ st->vref_mv;
 
 		return IIO_VAL_INT;
@@ -700,6 +690,17 @@ static int ad7380_write_raw(struct iio_dev *indio_dev,
 	}
 }
 
+static const struct iio_scan_type *ad7380_get_current_scan_type(
+		const struct iio_dev *indio_dev, struct iio_chan_spec const *chan)
+{
+	struct ad7380_state *st = iio_priv(indio_dev);
+
+	if (st->resolution_boost_enable)
+		return &chan->ext_scan_type[1];
+
+	return &chan->ext_scan_type[0];
+}
+
 static ssize_t oversampling_mode_show(struct device *dev,
 				      struct device_attribute *attr, char *buf)
 {
@@ -796,20 +797,22 @@ static const struct iio_info ad7380_info = {
 	.read_raw = &ad7380_read_raw,
 	.read_avail = &ad7380_read_avail,
 	.write_raw = &ad7380_write_raw,
+	.get_current_scan_type = &ad7380_get_current_scan_type,
 	.debugfs_reg_access = &ad7380_debugfs_reg_access,
 };
 
 static void ad7380_init_available_scales(struct ad7380_state *st)
 {
 	s64 tmp;
-	int value_micro, value_int, realbits, differential;
+	int value_micro, value_int, norm_bits, boost_bits, differential;
 
 	/*
 	 * Resolution boost allow to enable 2 higher bits resolution
 	 * when oversampling is enabled, so we can have only two
 	 * scales depending on the resolution boost status.
 	 */
-	realbits = st->chip_info->channels[0].scan_type.realbits;
+	norm_bits = st->chip_info->channels[0].ext_scan_type[0].realbits;
+	boost_bits = st->chip_info->channels[0].ext_scan_type[1].realbits;
 	differential = st->chip_info->channels[0].differential;
 
 	/*
@@ -818,12 +821,12 @@ static void ad7380_init_available_scales(struct ad7380_state *st)
 	 *    * VREF / 2^N, for pseudo-differential chips
 	 * where N is the ADC resolution (i.e realbits)
 	 */
-	tmp = (s64)st->vref_mv * MEGA >> (realbits - 2 - differential);
+	tmp = (s64)st->vref_mv * MEGA >> (norm_bits - differential);
 	value_int = div_s64_rem(tmp, MEGA, &value_micro);
 	st->scales[RESOLUTION_BOOST_DISABLE][0] = value_int;
 	st->scales[RESOLUTION_BOOST_DISABLE][1] = value_micro;
 
-	tmp = (s64)st->vref_mv * MEGA >> (realbits - differential);
+	tmp = (s64)st->vref_mv * MEGA >> (boost_bits - differential);
 	value_int = div_s64_rem(tmp, MEGA, &value_micro);
 	st->scales[RESOLUTION_BOOST_ENABLE][0] = value_int;
 	st->scales[RESOLUTION_BOOST_ENABLE][1] = value_micro;
