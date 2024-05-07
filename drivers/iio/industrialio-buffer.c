@@ -365,8 +365,10 @@ static ssize_t iio_show_fixed_type(struct device *dev,
 				   struct device_attribute *attr,
 				   char *buf)
 {
+	struct iio_dev *indio_dev = dev_to_iio_dev(dev);
 	struct iio_dev_attr *this_attr = to_iio_dev_attr(attr);
-	const struct iio_scan_type *scan_type = &this_attr->c->scan_type;
+	const struct iio_scan_type *scan_type =
+		iio_get_current_scan_type(indio_dev, this_attr->c);
 	u8 type = scan_type->endianness;
 
 	if (type == IIO_CPU) {
@@ -699,7 +701,7 @@ static unsigned int iio_storage_bytes_for_si(struct iio_dev *indio_dev,
 	unsigned int bytes;
 
 	ch = iio_find_channel_from_si(indio_dev, scan_index);
-	scan_type = &ch->scan_type;
+	scan_type = iio_get_current_scan_type(indio_dev, ch);
 	bytes = scan_type->storagebits / 8;
 
 	if (scan_type->repeat > 1)
@@ -1597,6 +1599,22 @@ static long iio_device_buffer_ioctl(struct iio_dev *indio_dev, struct file *filp
 	}
 }
 
+static int iio_channel_validate_scan_type(struct device *dev, int ch,
+					  const struct iio_scan_type *scan_type)
+{
+	/* Verify that sample bits fit into storage */
+	if (scan_type->storagebits < scan_type->realbits + scan_type->shift) {
+		dev_err(dev,
+			"Channel %d storagebits (%d) < shifted realbits (%d + %d)\n",
+			ch, scan_type->storagebits,
+			scan_type->realbits,
+			scan_type->shift);
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
 static int __iio_buffer_alloc_sysfs_and_mask(struct iio_buffer *buffer,
 					     struct iio_dev *indio_dev,
 					     int index)
@@ -1626,18 +1644,33 @@ static int __iio_buffer_alloc_sysfs_and_mask(struct iio_buffer *buffer,
 			if (channels[i].scan_index < 0)
 				continue;
 
-			scan_type = &channels[i].scan_type;
+			if (channels[i].has_ext_scan_type) {
+				int j;
 
-			/* Verify that sample bits fit into storage */
-			if (scan_type->storagebits <
-			    scan_type->realbits + scan_type->shift) {
-				dev_err(&indio_dev->dev,
-					"Channel %d storagebits (%d) < shifted realbits (%d + %d)\n",
-					i, scan_type->storagebits,
-					scan_type->realbits,
-					scan_type->shift);
-				ret = -EINVAL;
-				goto error_cleanup_dynamic;
+				/*
+				 * get_current_scan_type is required when using
+				 * extended scan types.
+				 */
+				if (!indio_dev->info->get_current_scan_type) {
+					ret = -EINVAL;
+					goto error_cleanup_dynamic;
+				}
+
+				for (j = 0; j < channels[i].num_ext_scan_type; j++) {
+					scan_type = &channels[i].ext_scan_type[j];
+
+					ret = iio_channel_validate_scan_type(
+						&indio_dev->dev, i, scan_type);
+					if (ret)
+						goto error_cleanup_dynamic;
+				}
+			} else {
+				scan_type = &channels[i].scan_type;
+
+				ret = iio_channel_validate_scan_type(
+						&indio_dev->dev, i, scan_type);
+				if (ret)
+					goto error_cleanup_dynamic;
 			}
 
 			ret = iio_buffer_add_channel_sysfs(indio_dev, buffer,
