@@ -31,6 +31,7 @@ struct spi_transfer;
 struct spi_controller_mem_ops;
 struct spi_controller_mem_caps;
 struct spi_message;
+struct spi_controller_offload_ops;
 
 /*
  * INTERFACES between SPI master-side drivers and SPI slave protocol handlers,
@@ -499,6 +500,7 @@ extern struct spi_device *spi_new_ancillary_device(struct spi_device *spi, u8 ch
  *	     This field is optional and should only be implemented if the
  *	     controller has native support for memory like operations.
  * @mem_caps: controller capabilities for the handling of memory operations.
+ * @offload_ops: operations for controllers with offload support.
  * @unprepare_message: undo any work done by prepare_message().
  * @slave_abort: abort the ongoing transfer request on an SPI slave controller
  * @target_abort: abort the ongoing transfer request on an SPI target controller
@@ -745,6 +747,9 @@ struct spi_controller {
 	/* Optimized handlers for SPI memory-like operations. */
 	const struct spi_controller_mem_ops *mem_ops;
 	const struct spi_controller_mem_caps *mem_caps;
+
+	/* Operations for controllers with offload support. */
+	const struct spi_controller_offload_ops *offload_ops;
 
 	/* GPIO chip select */
 	struct gpio_desc	**cs_gpiods;
@@ -1122,6 +1127,7 @@ struct spi_transfer {
  * @pre_optimized: peripheral driver pre-optimized the message
  * @optimized: the message is in the optimized state
  * @prepared: spi_prepare_message was called for the this message
+ * @offload: message is to be used with offload hardware
  * @status: zero for success, else negative errno
  * @complete: called to report transaction completions
  * @context: the argument to complete() when it's called
@@ -1131,6 +1137,7 @@ struct spi_transfer {
  * @queue: for use by whichever driver currently owns the message
  * @state: for use by whichever driver currently owns the message
  * @opt_state: for use by whichever driver currently owns the message
+ * @offload_state: for use by whichever driver currently owns the message
  * @resources: for resource management when the SPI message is processed
  *
  * A @spi_message is used to execute an atomic sequence of data transfers,
@@ -1159,6 +1166,8 @@ struct spi_message {
 
 	/* spi_prepare_message() was called for this message */
 	bool			prepared;
+	/* spi_offload_prepare() was called on this message */
+	bool			offload;
 
 	/*
 	 * REVISIT: we might want a flag affecting the behavior of the
@@ -1191,6 +1200,11 @@ struct spi_message {
 	 * __spi_optimize_message() and __spi_unoptimize_message().
 	 */
 	void			*opt_state;
+	/*
+	 * Optional state for use by controller driver between calls to
+	 * offload_ops->prepare() and offload_ops->unprepare().
+	 */
+	void			*offload_state;
 
 	/* List of spi_res resources when the SPI message is processed */
 	struct list_head        resources;
@@ -1553,6 +1567,49 @@ static inline ssize_t spi_w8r16be(struct spi_device *spi, u8 cmd)
 
 	return be16_to_cpu(result);
 }
+
+/*---------------------------------------------------------------------------*/
+
+/*
+ * Offloading support.
+ *
+ * Some SPI controllers support offloading of SPI transfers. Essentially,
+ * this allows the SPI controller to record SPI transfers and then play them
+ * back later in one go via a single trigger.
+ */
+
+/**
+ * struct spi_controller_offload_ops - callbacks for offload support
+ *
+ * Drivers for hardware with offload support need to implement all of these
+ * callbacks.
+ */
+struct spi_controller_offload_ops {
+	/**
+	 * @map_channel: Required callback to reserve an offload instance for
+	 * the given SPI device. If a SPI device requires more than one instance,
+	 * then @id is used to differentiate between them. Channels must be
+	 * unmapped in the struct spi_controller::cleanup() callback.
+	 */
+	int (*map_channel)(struct spi_device *spi, const char *id,
+			   const unsigned int *args, unsigned int num_args);
+	/**
+	 * @prepare: Required callback to prepare the offload for the given SPI
+	 * message. @msg and any of its members (including any xfer->tx_buf) is
+	 * not guaranteed to be valid beyond the lifetime of this call.
+	 */
+	int (*prepare)(struct spi_device *spi, const char *id,
+		       struct spi_message *msg);
+	/**
+	 * @unprepare: Required callback to release any resources used by prepare().
+	 */
+	void (*unprepare)(struct spi_device *spi, const char *id);
+};
+
+extern int spi_offload_prepare(struct spi_device *spi, const char *id,
+			       struct spi_message *msg);
+extern void spi_offload_unprepare(struct spi_device *spi, const char *id,
+				  struct spi_message *msg);
 
 /*---------------------------------------------------------------------------*/
 
