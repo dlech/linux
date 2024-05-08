@@ -2477,6 +2477,28 @@ static int of_spi_parse_dt(struct spi_controller *ctlr, struct spi_device *spi,
 	of_spi_parse_dt_cs_delay(nc, &spi->cs_hold, "spi-cs-hold-delay-ns");
 	of_spi_parse_dt_cs_delay(nc, &spi->cs_inactive, "spi-cs-inactive-delay-ns");
 
+	/* Offloads */
+	rc = of_property_count_u32_elems(nc, "spi-offloads");
+	if (rc > 0) {
+		int num_ch = rc;
+
+		if (!ctlr->offload_ops) {
+			dev_err(&ctlr->dev, "SPI controller doesn't support offloading\n");
+			return -EINVAL;
+		}
+
+		for (idx = 0; idx < num_ch; idx++) {
+			of_property_read_u32_index(nc, "spi-offloads", idx, &value);
+
+			rc = ctlr->offload_ops->map_channel(spi, idx, value);
+			if (rc) {
+				dev_err(&ctlr->dev, "Failed to map offload channel %d: %d\n",
+					value, rc);
+				return rc;
+			}
+		}
+	}
+
 	return 0;
 }
 
@@ -3230,6 +3252,11 @@ static int spi_controller_check_ops(struct spi_controller *ctlr)
 			return -EINVAL;
 		}
 	}
+
+	if (ctlr->offload_ops && !(ctlr->offload_ops->map_channel &&
+				   ctlr->offload_ops->prepare &&
+				   ctlr->offload_ops->unprepare))
+		return -EINVAL;
 
 	return 0;
 }
@@ -4707,6 +4734,79 @@ int spi_write_then_read(struct spi_device *spi,
 	return status;
 }
 EXPORT_SYMBOL_GPL(spi_write_then_read);
+
+/**
+ * spi_offload_prepare - prepare offload hardware for a transfer
+ * @spi:	The spi device to use for the transfers.
+ * @id:		Unique identifier for for spi device with more than one offload.
+ * @msg:	The SPI message to use for the offload operation.
+ *
+ * Requests an offload instance with the specified ID and programs it with the
+ * provided message.
+ *
+ * The message must not be pre-optimized (do not call spi_optimize_message() on
+ * the message).
+ *
+ * Calls must be balanced with spi_offload_unprepare().
+ *
+ * Return: 0 on success, else a negative error code.
+ */
+int spi_offload_prepare(struct spi_device *spi, unsigned int id,
+			struct spi_message *msg)
+{
+	struct spi_controller *ctlr = spi->controller;
+	int ret;
+
+	if (!ctlr->offload_ops)
+		return -ENOTSUPP;
+
+	msg->offload = true;
+
+	ret = spi_optimize_message(spi, msg);
+	if (ret)
+		return ret;
+
+	mutex_lock(&ctlr->io_mutex);
+	ret = ctlr->offload_ops->prepare(spi, id, msg);
+	mutex_unlock(&ctlr->io_mutex);
+
+	if (ret) {
+		spi_unoptimize_message(msg);
+		msg->offload = false;
+		return ret;
+	}
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(spi_offload_prepare);
+
+/**
+ * spi_offload_unprepare - releases any resources used by spi_offload_prepare()
+ * @spi:	The same SPI device passed to spi_offload_prepare()
+ * @id:		The same ID device passed to spi_offload_prepare()
+ * @msg:	The same SPI message passed to spi_offload_prepare()
+ *
+ * Callers must ensure that the offload is no longer in use before calling this
+ * function, e.g. no in-progress transfers.
+ */
+void spi_offload_unprepare(struct spi_device *spi, unsigned int id,
+			   struct spi_message *msg)
+{
+	struct spi_controller *ctlr = spi->controller;
+
+	if (!ctlr->offload_ops)
+		return;
+
+	mutex_lock(&ctlr->io_mutex);
+	ctlr->offload_ops->unprepare(spi, id);
+	mutex_unlock(&ctlr->io_mutex);
+
+	msg->offload = false;
+	msg->offload_state = NULL;
+
+	spi_unoptimize_message(msg);
+}
+EXPORT_SYMBOL_GPL(spi_offload_unprepare);
 
 /*-------------------------------------------------------------------------*/
 
