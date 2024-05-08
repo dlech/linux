@@ -113,6 +113,16 @@ properties:
     minItems: 2
     maxItems: 4
 
+  spi-offloads:
+    $ref: /schemas/types.yaml#/definitions/uint32-array
+    description:
+      Array of controller offload instances that are reserved for use by the
+      peripheral device. The semantic meaning of the values of the array
+      elements is defined by the controller. For example, it could be a simple
+      0-based index of the offload instance, or it could be a bitfield where
+      a few bits represent the assigned hardware trigger, a few bits represent
+      the assigned RX stream, etc.
+
   st,spi-midi-ns:
     description: |
       Only for STM32H7, (Master Inter-Data Idleness) minimum time
