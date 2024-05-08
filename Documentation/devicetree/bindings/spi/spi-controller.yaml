@@ -105,6 +105,11 @@ properties:
     required:
       - compatible
 
+  '#spi-offload-cells':
+    $ref: /schemas/types.yaml#/definitions/uint32
+    description:
+      Number of cells in a SPI offload specifier.
+
 patternProperties:
   "^.*@[0-9a-f]+$":
     type: object

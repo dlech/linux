@@ -113,6 +113,17 @@ properties:
     minItems: 2
     maxItems: 4
 
+  spi-offloads:
+    $ref: /schemas/types.yaml#/definitions/phandle-array
+    description:
+      Array of SPI offload instances that are used by the peripheral.
+
+  spi-offload-names:
+    $ref: /schemas/types.yaml#/definitions/string-array
+    description:
+      Describes the function of each offload instance. Can be omitted if there
+      is only one item allowed in the spi-offloads array.
+
   st,spi-midi-ns:
     description: |
       Only for STM32H7, (Master Inter-Data Idleness) minimum time
