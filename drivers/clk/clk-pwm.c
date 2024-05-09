@@ -41,7 +41,32 @@ static unsigned long clk_pwm_recalc_rate(struct clk_hw *hw,
 {
 	struct clk_pwm *clk_pwm = to_clk_pwm(hw);
 
-	return clk_pwm->fixed_rate;
+	return div64_u64(NSEC_PER_SEC, pwm_get_period(clk_pwm->pwm));
+}
+
+static long clk_pwm_round_rate(struct clk_hw *hw, unsigned long rate,
+			       unsigned long *parent_rate)
+{
+	/* TODO: PWM doesn't have rounding APIs */
+	return rate;
+}
+
+static int clk_pwm_set_rate(struct clk_hw *hw, unsigned long rate,
+			    unsigned long parent_rate)
+{
+	struct clk_pwm *clk_pwm = to_clk_pwm(hw);
+	struct pwm_state state;
+	unsigned int duty_cycle;
+	int ret;
+
+	pwm_get_state(clk_pwm->pwm, &state);
+	duty_cycle = pwm_get_relative_duty_cycle(&state, UINT_MAX);
+	state.period = div64_u64(NSEC_PER_SEC, rate);
+	ret = pwm_set_relative_duty_cycle(&state, duty_cycle, UINT_MAX);
+	if (ret)
+		return ret;
+
+	return pwm_apply_might_sleep(clk_pwm->pwm, &state);
 }
 
 static int clk_pwm_get_duty_cycle(struct clk_hw *hw, struct clk_duty *duty)
@@ -57,11 +82,28 @@ static int clk_pwm_get_duty_cycle(struct clk_hw *hw, struct clk_duty *duty)
 	return 0;
 }
 
+static int clk_pwm_set_duty_cycle(struct clk_hw *hw, struct clk_duty *duty)
+{
+	struct clk_pwm *clk_pwm = to_clk_pwm(hw);
+	struct pwm_state state;
+	int ret;
+
+	pwm_get_state(clk_pwm->pwm, &state);
+	ret = pwm_set_relative_duty_cycle(&state, duty->num, duty->den);
+	if (ret < 0)
+		return ret;
+
+	return pwm_apply_might_sleep(clk_pwm->pwm, &state);
+}
+
 static const struct clk_ops clk_pwm_ops = {
 	.prepare = clk_pwm_prepare,
 	.unprepare = clk_pwm_unprepare,
 	.recalc_rate = clk_pwm_recalc_rate,
+	.round_rate = clk_pwm_round_rate,
+	.set_rate = clk_pwm_set_rate,
 	.get_duty_cycle = clk_pwm_get_duty_cycle,
+	.set_duty_cycle = clk_pwm_set_duty_cycle,
 };
 
 static int clk_pwm_probe(struct platform_device *pdev)
