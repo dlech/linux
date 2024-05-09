@@ -9,6 +9,7 @@
 #include <linux/align.h>
 #include <linux/bitfield.h>
 #include <linux/bitops.h>
+#include <linux/clk.h>
 #include <linux/delay.h>
 #include <linux/device.h>
 #include <linux/err.h>
@@ -21,6 +22,7 @@
 
 #include <linux/iio/iio.h>
 #include <linux/iio/sysfs.h>
+#include <linux/iio/buffer-dmaengine.h>
 #include <linux/iio/trigger_consumer.h>
 #include <linux/iio/triggered_buffer.h>
 
@@ -54,6 +56,8 @@ struct ad7944_adc {
 	enum ad7944_spi_mode spi_mode;
 	struct spi_transfer xfers[3];
 	struct spi_message msg;
+	struct spi_transfer offload_xfers[3];
+	struct spi_message offload_msg;
 	void *chain_mode_buf;
 	/* Chip-specific timing specifications. */
 	const struct ad7944_timing_spec *timing_spec;
@@ -65,6 +69,8 @@ struct ad7944_adc {
 	bool always_turbo;
 	/* Reference voltage (millivolts). */
 	unsigned int ref_mv;
+	/* Clock that triggers SPI offload. */
+	struct clk *trigger_clk;
 
 	/*
 	 * DMA (thus cache coherency maintenance) requires the
@@ -81,6 +87,8 @@ struct ad7944_adc {
 
 /* quite time before CNV rising edge */
 #define T_QUIET_NS	20
+/* minimum CNV high time to trigger conversion */
+#define T_CNVH_NS	20
 
 static const struct ad7944_timing_spec ad7944_timing_spec = {
 	.conv_ns = 420,
@@ -123,6 +131,7 @@ static const struct ad7944_chip_info _name##_chip_info = {		\
 			.scan_type.endianness = IIO_CPU,		\
 			.info_mask_separate = BIT(IIO_CHAN_INFO_RAW)	\
 					| BIT(IIO_CHAN_INFO_SCALE),	\
+			.info_mask_shared_by_type = BIT(IIO_CHAN_INFO_SAMP_FREQ),\
 		},							\
 		IIO_CHAN_SOFT_TIMESTAMP(1),				\
 	},								\
@@ -236,6 +245,54 @@ static int ad7944_chain_mode_init_msg(struct device *dev, struct ad7944_adc *adc
 	return devm_spi_optimize_message(dev, adc->spi, &adc->msg);
 }
 
+static void ad7944_offload_unprepare(void *p)
+{
+	struct ad7944_adc *adc = p;
+
+	spi_offload_unprepare(adc->spi, NULL, &adc->offload_msg);
+}
+
+/*
+ * Unlike ad7944_3wire_cs_mode_init_msg(), this creates a message that reads
+ * during the conversion phase instead of the acquisition phase when reading
+ * a sample from the ADC. This is needed to be able to read at the maximum
+ * sample rate. It requires the SPI controller to have offload support and a
+ * high enough SCLK rate to read the sample during the conversion phase.
+ */
+static int ad7944_3wire_cs_mode_init_offload_msg(struct device *dev,
+						 struct ad7944_adc *adc,
+						 const struct iio_chan_spec *chan)
+{
+	struct spi_transfer *xfers = adc->offload_xfers;
+	int ret;
+
+	/*
+	 * CS is tied to CNV and we need a low to high transition to start the
+	 * conversion, so place CNV low for t_QUIET to prepare for this.
+	 */
+	xfers[0].delay.value = T_QUIET_NS;
+	xfers[0].delay.unit = SPI_DELAY_UNIT_NSECS;
+
+	/* CNV has to be high for a minimum time to trigger conversion. */
+	xfers[1].cs_off = 1;
+	xfers[1].delay.value = T_CNVH_NS;
+	xfers[1].delay.unit = SPI_DELAY_UNIT_NSECS;
+
+	/* Then we can read the previous sample during the conversion phase */
+	xfers[2].offload_flags = SPI_OFFLOAD_XFER_RX_STREAM;
+	xfers[2].len = BITS_TO_BYTES(chan->scan_type.storagebits);
+	xfers[2].bits_per_word = chan->scan_type.realbits;
+
+	spi_message_init_with_transfers(&adc->offload_msg, xfers,
+					ARRAY_SIZE(adc->offload_xfers));
+
+	ret = spi_offload_prepare(adc->spi, NULL, &adc->offload_msg);
+	if (ret)
+		return dev_err_probe(dev, ret, "failed to prepare offload\n");
+
+	return devm_add_action_or_reset(dev, ad7944_offload_unprepare, adc);
+}
+
 /**
  * ad7944_convert_and_acquire - Perform a single conversion and acquisition
  * @adc: The ADC device structure
@@ -323,6 +380,30 @@ static int ad7944_read_raw(struct iio_dev *indio_dev,
 			return -EINVAL;
 		}
 
+	case IIO_CHAN_INFO_SAMP_FREQ:
+		if (!adc->trigger_clk)
+			return -EOPNOTSUPP;
+
+		*val = clk_get_rate(adc->trigger_clk);
+		return IIO_VAL_INT;
+
+	default:
+		return -EINVAL;
+	}
+}
+
+static int ad7944_write_raw(struct iio_dev *indio_dev,
+			    const struct iio_chan_spec *chan,
+			    int val, int val2, long info)
+{
+	struct ad7944_adc *adc = iio_priv(indio_dev);
+
+	switch (info) {
+	case IIO_CHAN_INFO_SAMP_FREQ:
+		if (!adc->trigger_clk)
+			return -EOPNOTSUPP;
+
+		return clk_set_rate(adc->trigger_clk, val);
 	default:
 		return -EINVAL;
 	}
@@ -330,6 +411,48 @@ static int ad7944_read_raw(struct iio_dev *indio_dev,
 
 static const struct iio_info ad7944_iio_info = {
 	.read_raw = &ad7944_read_raw,
+	.write_raw = &ad7944_write_raw,
+};
+
+static int ad7944_offload_buffer_postenable(struct iio_dev *indio_dev)
+{
+	struct ad7944_adc *adc = iio_priv(indio_dev);
+	int ret;
+
+	gpiod_set_value_cansleep(adc->turbo, 1);
+
+	ret = clk_prepare_enable(adc->trigger_clk);
+	if (ret)
+		goto err_turbo_off;
+
+	ret = spi_offload_hw_trigger_mode_enable(adc->spi, NULL);
+	if (ret)
+		goto err_clk_off;
+
+	return 0;
+
+err_clk_off:
+	clk_disable_unprepare(adc->trigger_clk);
+err_turbo_off:
+	gpiod_set_value_cansleep(adc->turbo, 0);
+
+	return ret;
+}
+
+static int ad7944_offload_buffer_predisable(struct iio_dev *indio_dev)
+{
+	struct ad7944_adc *adc = iio_priv(indio_dev);
+
+	spi_offload_hw_trigger_mode_disable(adc->spi, NULL);
+	clk_disable_unprepare(adc->trigger_clk);
+	gpiod_set_value_cansleep(adc->turbo, 0);
+
+	return 0;
+}
+
+static const struct iio_buffer_setup_ops ad7944_offload_buffer_setup_ops = {
+	.postenable = &ad7944_offload_buffer_postenable,
+	.predisable = &ad7944_offload_buffer_predisable,
 };
 
 static irqreturn_t ad7944_trigger_handler(int irq, void *p)
@@ -444,6 +567,11 @@ static const char * const ad7944_power_supplies[] = {
 	"avdd",	"dvdd",	"bvdd", "vio"
 };
 
+static void ad7944_put_clk_trigger(void *p)
+{
+	clk_put(p);
+}
+
 static int ad7944_probe(struct spi_device *spi)
 {
 	const struct ad7944_chip_info *chip_info;
@@ -554,13 +682,11 @@ static int ad7944_probe(struct spi_device *spi)
 		ret = ad7944_4wire_mode_init_msg(dev, adc, &chip_info->channels[0]);
 		if (ret)
 			return ret;
-
 		break;
 	case AD7944_SPI_MODE_SINGLE:
 		ret = ad7944_3wire_cs_mode_init_msg(dev, adc, &chip_info->channels[0]);
 		if (ret)
 			return ret;
-
 		break;
 	case AD7944_SPI_MODE_CHAIN:
 		ret = device_property_read_u32(dev, "#daisy-chained-devices",
@@ -597,11 +723,43 @@ static int ad7944_probe(struct spi_device *spi)
 		indio_dev->num_channels = ARRAY_SIZE(chip_info->channels);
 	}
 
-	ret = devm_iio_triggered_buffer_setup(dev, indio_dev,
-					      iio_pollfunc_store_time,
-					      ad7944_trigger_handler, NULL);
-	if (ret)
-		return ret;
+	if (device_property_present(dev, "spi-offloads")) {
+		if (adc->spi_mode != AD7944_SPI_MODE_SINGLE)
+			return dev_err_probe(dev, -EINVAL,
+					     "offload only supported in single mode\n");
+
+		ret = ad7944_3wire_cs_mode_init_offload_msg(dev, adc,
+							    &chip_info->channels[0]);
+		if (ret)
+			return ret;
+
+		adc->trigger_clk = spi_offload_hw_trigger_get_clk(spi, NULL);
+		if (IS_ERR(adc->trigger_clk))
+			return dev_err_probe(dev, PTR_ERR(adc->trigger_clk),
+					     "failed to get trigger clk\n");
+
+		ret = devm_add_action_or_reset(dev, ad7944_put_clk_trigger,
+					       adc->trigger_clk);
+		if (ret)
+			return ret;
+
+		ret = devm_iio_dmaengine_buffer_setup_ext(dev, indio_dev,
+			spi_offload_rx_stream_get_dma_chan(spi, NULL),
+			IIO_BUFFER_DIRECTION_IN);
+		if (ret)
+			return ret;
+
+		indio_dev->setup_ops = &ad7944_offload_buffer_setup_ops;
+		/* offload can't have soft timestamp */
+		indio_dev->num_channels--;
+	} else {
+		ret = devm_iio_triggered_buffer_setup(dev, indio_dev,
+						      iio_pollfunc_store_time,
+						      ad7944_trigger_handler,
+						      NULL);
+		if (ret)
+			return ret;
+	}
 
 	return devm_iio_device_register(dev, indio_dev);
 }
@@ -636,3 +794,4 @@ module_spi_driver(ad7944_driver);
 MODULE_AUTHOR("David Lechner <dlechner@baylibre.com>");
 MODULE_DESCRIPTION("Analog Devices AD7944 PulSAR ADC family driver");
 MODULE_LICENSE("GPL");
+MODULE_IMPORT_NS(IIO_DMAENGINE_BUFFER);
