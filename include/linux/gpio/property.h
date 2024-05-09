@@ -2,7 +2,6 @@
 #ifndef __LINUX_GPIO_PROPERTY_H
 #define __LINUX_GPIO_PROPERTY_H
 
-#include <dt-bindings/gpio/gpio.h> /* for GPIO_* flags */
 #include <linux/property.h>
 
 struct software_node;
