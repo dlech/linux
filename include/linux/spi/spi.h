@@ -634,6 +634,9 @@ struct spi_controller {
 	/* Flag indicating that the SPI bus is locked for exclusive use */
 	bool			bus_lock_flag;
 
+	/* Flag indicating the bus is reserved for use by hardware trigger */
+	bool			offload_hw_trigger_mode_enabled;
+
 	/*
 	 * Setup mode and clock, etc (SPI driver may call many times).
 	 *
@@ -1604,12 +1607,49 @@ struct spi_controller_offload_ops {
 	 * @unprepare: Required callback to release any resources used by prepare().
 	 */
 	void (*unprepare)(struct spi_device *spi, const char *id);
+	/**
+	 * @hw_trigger_mode_enable: Optional callback to enable the hardware
+	 * trigger for the given offload instance.
+	 */
+	int (*hw_trigger_mode_enable)(struct spi_device *spi, const char *id);
+	/**
+	 * @hw_trigger_mode_disable: Optional callback to disable the hardware
+	 * trigger for the given offload instance.
+	 */
+	void (*hw_trigger_mode_disable)(struct spi_device *spi, const char *id);
+	/**
+	 * @hw_trigger_get_clk: Optional callback for controllers that have a
+	 * hardware offload trigger that is connected to a clock.
+	 */
+	struct clk *(*hw_trigger_get_clk)(struct spi_device *spi, const char *id);
 };
 
 extern int spi_offload_prepare(struct spi_device *spi, const char *id,
 			       struct spi_message *msg);
 extern void spi_offload_unprepare(struct spi_device *spi, const char *id,
 				  struct spi_message *msg);
+extern int spi_offload_hw_trigger_mode_enable(struct spi_device *spi, const char *id);
+extern void spi_offload_hw_trigger_mode_disable(struct spi_device *spi, const char *id);
+
+/**
+ * spi_offload_hw_trigger_get_clk - Get the clock for the offload trigger
+ * @spi: SPI device
+ * @id: Function ID if SPI device uses more than one offload or NULL.
+ *
+ * The caller is responsible for calling clk_put() on the returned clock.
+ *
+ * Return: The clock for the offload trigger, or negative error code
+ */
+static inline
+struct clk *spi_offload_hw_trigger_get_clk(struct spi_device *spi, const char *id)
+{
+	struct spi_controller *ctlr = spi->controller;
+
+	if (!ctlr->offload_ops || !ctlr->offload_ops->hw_trigger_get_clk)
+		return ERR_PTR(-EOPNOTSUPP);
+
+	return ctlr->offload_ops->hw_trigger_get_clk(spi, id);
+}
 
 /*---------------------------------------------------------------------------*/
 
