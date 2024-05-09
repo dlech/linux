@@ -129,6 +129,25 @@ properties:
       line goes high while the SDI and CNV lines are high (chain mode),
     maxItems: 1
 
+  # optional SPI offload support for use with AXI SPI Engine
+
+  spi-offloads:
+    maxItems: 1
+
+  dmas:
+    maxItems: 1
+    description: RX DMA Channel for receiving a samples from the SPI offload.
+
+  dma-names:
+    const: rx
+
+  clocks:
+    maxItems: 1
+    description: Clock to trigger the SPI offload for reading a sample.
+
+  clock-names:
+    const: trigger
+
 required:
   - compatible
   - reg
@@ -190,6 +209,23 @@ allOf:
       properties:
         turbo-gpios: false
 
+  # certain properties are for SPI offload use only
+  - if:
+      required:
+        - spi-offloads
+    then:
+      required:
+        - dmas
+        - dma-names
+        - clocks
+        - clock-names
+    else:
+      properties:
+        dmas: false
+        dma-names: false
+        clocks: false
+        clock-names: false
+
 unevaluatedProperties: false
 
 examples:
@@ -209,5 +245,27 @@ examples:
             bvdd-supply = <&supply_5V>;
             cnv-gpios = <&gpio 0 GPIO_ACTIVE_HIGH>;
             turbo-gpios = <&gpio 1 GPIO_ACTIVE_HIGH>;
+        };
+    };
+  - |
+    #include <dt-bindings/gpio/gpio.h>
+    spi {
+        #address-cells = <1>;
+        #size-cells = <0>;
+        adc@0 {
+            compatible = "adi,ad7944";
+            reg = <0>;
+            spi-cpha;
+            spi-max-frequency = <111111111>;
+            adi,spi-mode = "single";
+            avdd-supply = <&supply_2_5V>;
+            dvdd-supply = <&supply_2_5V>;
+            vio-supply = <&supply_1_8V>;
+            bvdd-supply = <&supply_5V>;
+            spi-offloads = <0>;
+            dmas = <&dma 0>;
+            dma-names = "rx";
+            clocks = <&trigger_clk>;
+            clock-names = "trigger";
         };
     };
