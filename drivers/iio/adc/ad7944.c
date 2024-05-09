@@ -9,6 +9,7 @@
 #include <linux/align.h>
 #include <linux/bitfield.h>
 #include <linux/bitops.h>
+#include <linux/clk.h>
 #include <linux/delay.h>
 #include <linux/device.h>
 #include <linux/err.h>
@@ -21,6 +22,7 @@
 
 #include <linux/iio/iio.h>
 #include <linux/iio/sysfs.h>
+#include <linux/iio/buffer-dmaengine.h>
 #include <linux/iio/trigger_consumer.h>
 #include <linux/iio/triggered_buffer.h>
 
@@ -65,6 +67,8 @@ struct ad7944_adc {
 	bool always_turbo;
 	/* Reference voltage (millivolts). */
 	unsigned int ref_mv;
+	/* Clock that triggers SPI offload. */
+	struct clk *trigger_clk;
 
 	/*
 	 * DMA (thus cache coherency maintenance) requires the
@@ -123,6 +127,7 @@ static const struct ad7944_chip_info _name##_chip_info = {		\
 			.scan_type.endianness = IIO_CPU,		\
 			.info_mask_separate = BIT(IIO_CHAN_INFO_RAW)	\
 					| BIT(IIO_CHAN_INFO_SCALE),	\
+			.info_mask_shared_by_type = BIT(IIO_CHAN_INFO_SAMP_FREQ),\
 		},							\
 		IIO_CHAN_SOFT_TIMESTAMP(1),				\
 	},								\
@@ -134,18 +139,12 @@ AD7944_DEFINE_CHIP_INFO(ad7985, ad7944, 16, 0);
 /* fully differential */
 AD7944_DEFINE_CHIP_INFO(ad7986, ad7986, 18, 1);
 
-static void ad7944_unoptimize_msg(void *msg)
-{
-	spi_unoptimize_message(msg);
-}
-
-static int ad7944_3wire_cs_mode_init_msg(struct device *dev, struct ad7944_adc *adc,
-					 const struct iio_chan_spec *chan)
+static void ad7944_3wire_cs_mode_init_msg(struct device *dev, struct ad7944_adc *adc,
+					  const struct iio_chan_spec *chan)
 {
 	unsigned int t_conv_ns = adc->always_turbo ? adc->timing_spec->turbo_conv_ns
 						   : adc->timing_spec->conv_ns;
 	struct spi_transfer *xfers = adc->xfers;
-	int ret;
 
 	/*
 	 * NB: can get better performance from some SPI controllers if we use
@@ -174,21 +173,14 @@ static int ad7944_3wire_cs_mode_init_msg(struct device *dev, struct ad7944_adc *
 	xfers[2].bits_per_word = chan->scan_type.realbits;
 
 	spi_message_init_with_transfers(&adc->msg, xfers, 3);
-
-	ret = spi_optimize_message(adc->spi, &adc->msg);
-	if (ret)
-		return ret;
-
-	return devm_add_action_or_reset(dev, ad7944_unoptimize_msg, &adc->msg);
 }
 
-static int ad7944_4wire_mode_init_msg(struct device *dev, struct ad7944_adc *adc,
-				      const struct iio_chan_spec *chan)
+static void ad7944_4wire_mode_init_msg(struct device *dev, struct ad7944_adc *adc,
+				       const struct iio_chan_spec *chan)
 {
 	unsigned int t_conv_ns = adc->always_turbo ? adc->timing_spec->turbo_conv_ns
 						   : adc->timing_spec->conv_ns;
 	struct spi_transfer *xfers = adc->xfers;
-	int ret;
 
 	/*
 	 * NB: can get better performance from some SPI controllers if we use
@@ -208,12 +200,6 @@ static int ad7944_4wire_mode_init_msg(struct device *dev, struct ad7944_adc *adc
 	xfers[1].bits_per_word = chan->scan_type.realbits;
 
 	spi_message_init_with_transfers(&adc->msg, xfers, 2);
-
-	ret = spi_optimize_message(adc->spi, &adc->msg);
-	if (ret)
-		return ret;
-
-	return devm_add_action_or_reset(dev, ad7944_unoptimize_msg, &adc->msg);
 }
 
 static int ad7944_chain_mode_init_msg(struct device *dev, struct ad7944_adc *adc,
@@ -345,6 +331,30 @@ static int ad7944_read_raw(struct iio_dev *indio_dev,
 			return -EINVAL;
 		}
 
+	case IIO_CHAN_INFO_SAMP_FREQ:
+		if (!adc->trigger_clk)
+			return -EOPNOTSUPP;
+
+		*val = clk_get_rate(adc->trigger_clk);
+		return IIO_VAL_INT;
+
+	default:
+		return -EINVAL;
+	}
+}
+
+static int ad7944_write_raw(struct iio_dev *indio_dev,
+			    const struct iio_chan_spec *chan,
+			    int val, int val2, long info)
+{
+	struct ad7944_adc *adc = iio_priv(indio_dev);
+
+	switch (info) {
+	case IIO_CHAN_INFO_SAMP_FREQ:
+		if (!adc->trigger_clk)
+			return -EOPNOTSUPP;
+
+		return clk_set_rate(adc->trigger_clk, val);
 	default:
 		return -EINVAL;
 	}
@@ -352,6 +362,28 @@ static int ad7944_read_raw(struct iio_dev *indio_dev,
 
 static const struct iio_info ad7944_iio_info = {
 	.read_raw = &ad7944_read_raw,
+	.write_raw = &ad7944_write_raw,
+};
+
+static int ad7944_offload_ex_buffer_postenable(struct iio_dev *indio_dev)
+{
+	struct ad7944_adc *adc = iio_priv(indio_dev);
+
+	return spi_offload_hw_trigger_enable(adc->spi, 0);
+}
+
+static int ad7944_offload_ex_buffer_predisable(struct iio_dev *indio_dev)
+{
+	struct ad7944_adc *adc = iio_priv(indio_dev);
+
+	spi_offload_hw_trigger_disable(adc->spi, 0);
+
+	return 0;
+}
+
+static const struct iio_buffer_setup_ops ad7944_offload_ex_buffer_setup_ops = {
+	.postenable = &ad7944_offload_ex_buffer_postenable,
+	.predisable = &ad7944_offload_ex_buffer_predisable,
 };
 
 static irqreturn_t ad7944_trigger_handler(int irq, void *p)
@@ -469,6 +501,18 @@ static const char * const ad7944_power_supplies[] = {
 static void ad7944_ref_disable(void *ref)
 {
 	regulator_disable(ref);
+}
+
+static void ad7944_offload_unprepare(void *p)
+{
+	struct ad7944_adc *adc = p;
+
+	spi_offload_unprepare(adc->spi, 0, &adc->msg);
+}
+
+static void ad7944_unoptimize_msg(void *msg)
+{
+	spi_unoptimize_message(msg);
 }
 
 static int ad7944_probe(struct spi_device *spi)
@@ -603,16 +647,10 @@ static int ad7944_probe(struct spi_device *spi)
 
 	switch (adc->spi_mode) {
 	case AD7944_SPI_MODE_DEFAULT:
-		ret = ad7944_4wire_mode_init_msg(dev, adc, &chip_info->channels[0]);
-		if (ret)
-			return ret;
-
+		ad7944_4wire_mode_init_msg(dev, adc, &chip_info->channels[0]);
 		break;
 	case AD7944_SPI_MODE_SINGLE:
-		ret = ad7944_3wire_cs_mode_init_msg(dev, adc, &chip_info->channels[0]);
-		if (ret)
-			return ret;
-
+		ad7944_3wire_cs_mode_init_msg(dev, adc, &chip_info->channels[0]);
 		break;
 	case AD7944_SPI_MODE_CHAIN:
 		ret = device_property_read_u32(dev, "#daisy-chained-devices",
@@ -649,11 +687,48 @@ static int ad7944_probe(struct spi_device *spi)
 		indio_dev->num_channels = ARRAY_SIZE(chip_info->channels);
 	}
 
-	ret = devm_iio_triggered_buffer_setup(dev, indio_dev,
-					      iio_pollfunc_store_time,
-					      ad7944_trigger_handler, NULL);
-	if (ret)
-		return ret;
+	if (device_property_present(dev, "spi-offloads")) {
+		/* TODO: make this a parameter to ad7944_3wire_cs_mode_init_msg() */
+		/* FIXME: wrong index for 4-wire mode */
+		adc->xfers[2].rx_buf = NULL;
+		adc->xfers[2].offload_flags = SPI_OFFLOAD_XFER_RX_STREAM;
+
+		ret = spi_offload_prepare(adc->spi, 0, &adc->msg);
+		if (ret)
+			return dev_err_probe(dev, ret, "failed to prepare offload\n");
+
+		ret = devm_add_action_or_reset(dev, ad7944_offload_unprepare, adc);
+		if (ret)
+			return ret;
+
+		adc->trigger_clk = devm_clk_get_enabled(dev, "trigger");
+		if (IS_ERR(adc->trigger_clk))
+			return dev_err_probe(dev, PTR_ERR(adc->trigger_clk),
+					     "failed to get trigger clk\n");
+
+		ret = devm_iio_dmaengine_buffer_setup(dev, indio_dev, "rx");
+		if (ret)
+			return ret;
+
+		indio_dev->setup_ops = &ad7944_offload_ex_buffer_setup_ops;
+		/* offload can't have soft timestamp */
+		indio_dev->num_channels--;
+	} else {
+		ret = spi_optimize_message(adc->spi, &adc->msg);
+		if (ret)
+			return ret;
+
+		ret = devm_add_action_or_reset(dev, ad7944_unoptimize_msg, &adc->msg);
+		if (ret)
+			return ret;
+
+		ret = devm_iio_triggered_buffer_setup(dev, indio_dev,
+						      iio_pollfunc_store_time,
+						      ad7944_trigger_handler,
+						      NULL);
+		if (ret)
+			return ret;
+	}
 
 	return devm_iio_device_register(dev, indio_dev);
 }
