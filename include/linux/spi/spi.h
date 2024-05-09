@@ -632,6 +632,9 @@ struct spi_controller {
 	/* Flag indicating that the SPI bus is locked for exclusive use */
 	bool			bus_lock_flag;
 
+	/* Flag indicating the bus is reserved for use by hardware trigger */
+	bool			offload_hw_trigger_enabled;
+
 	/*
 	 * Setup mode and clock, etc (SPI driver may call many times).
 	 *
@@ -1594,12 +1597,26 @@ struct spi_controller_offload_ops {
 	 * @unprepare: Callback to release any resources used by prepare().
 	 */
 	void (*unprepare)(struct spi_device *spi, unsigned int id);
+
+	/**
+	 * @hw_trigger_enable: Callback to enable the hardware trigger for the
+	 * given offload instance.
+	 */
+
+	int (*hw_trigger_enable)(struct spi_device *spi, unsigned int id);
+	/**
+	 * @hw_trigger_disable: Callback to disable the hardware trigger for the
+	 * given offload instance.
+	 */
+	void (*hw_trigger_disable)(struct spi_device *spi, unsigned int id);
 };
 
 extern int spi_offload_prepare(struct spi_device *spi, unsigned int id,
 			       struct spi_message *msg);
 extern void spi_offload_unprepare(struct spi_device *spi, unsigned int id,
 				  struct spi_message *msg);
+extern int spi_offload_hw_trigger_enable(struct spi_device *spi, unsigned int id);
+extern void spi_offload_hw_trigger_disable(struct spi_device *spi, unsigned int id);
 
 /*---------------------------------------------------------------------------*/
 
