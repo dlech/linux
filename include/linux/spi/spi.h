@@ -500,6 +500,8 @@ extern struct spi_device *spi_new_ancillary_device(struct spi_device *spi, u8 ch
  *	     This field is optional and should only be implemented if the
  *	     controller has native support for memory like operations.
  * @mem_caps: controller capabilities for the handling of memory operations.
+ * @offload_xfer_flags: flags supported by this controller for offloading
+ *	transfers. See struct spi_transfer for the list of flags.
  * @offload_ops: operations for controllers with offload support.
  * @unprepare_message: undo any work done by prepare_message().
  * @slave_abort: abort the ongoing transfer request on an SPI slave controller
@@ -752,6 +754,7 @@ struct spi_controller {
 	const struct spi_controller_mem_caps *mem_caps;
 
 	/* Operations for controllers with offload support. */
+	unsigned int offload_xfer_flags;
 	const struct spi_controller_offload_ops *offload_ops;
 
 	/* GPIO chip select */
@@ -995,6 +998,7 @@ struct spi_res {
  * @rx_sg_mapped: If true, the @rx_sg is mapped for DMA
  * @tx_sg: Scatterlist for transmit, currently not for client use
  * @rx_sg: Scatterlist for receive, currently not for client use
+ * @offload_flags: flags for xfers that use special hardware offload features
  * @ptp_sts_word_pre: The word (subject to bits_per_word semantics) offset
  *	within @tx_buf for which the SPI device is requesting that the time
  *	snapshot for this transfer begins. Upon completing the SPI transfer,
@@ -1114,6 +1118,12 @@ struct spi_transfer {
 	u32		speed_hz;
 
 	u32		effective_speed_hz;
+
+	unsigned int	offload_flags;
+/* this is write xfer but TX uses external data stream rather than tx_buf */
+#define SPI_OFFLOAD_XFER_TX_STREAM	BIT(0)
+/* this is read xfer but RX uses external data stream rather than rx_buf */
+#define SPI_OFFLOAD_XFER_RX_STREAM	BIT(1)
 
 	unsigned int	ptp_sts_word_pre;
 	unsigned int	ptp_sts_word_post;
@@ -1622,6 +1632,20 @@ struct spi_controller_offload_ops {
 	 * hardware offload trigger that is connected to a clock.
 	 */
 	struct clk *(*hw_trigger_get_clk)(struct spi_device *spi, const char *id);
+	/**
+	 * @tx_stream_get_dma_chan: Optional callback for controllers that have
+	 * an offload where the TX data stream is connected directly to a DMA
+	 * channel.
+	 */
+	struct dma_chan *(*tx_stream_get_dma_chan)(struct spi_device *spi,
+						   const char *id);
+	/**
+	 * @rx_stream_get_dma_chan: Optional callback for controllers that have
+	 * an offload where the RX data stream is connected directly to a DMA
+	 * channel.
+	 */
+	struct dma_chan *(*rx_stream_get_dma_chan)(struct spi_device *spi,
+						   const char *id);
 };
 
 extern int spi_offload_prepare(struct spi_device *spi, const char *id,
@@ -1649,6 +1673,54 @@ struct clk *spi_offload_hw_trigger_get_clk(struct spi_device *spi, const char *i
 		return ERR_PTR(-EOPNOTSUPP);
 
 	return ctlr->offload_ops->hw_trigger_get_clk(spi, id);
+}
+
+/**
+ * spi_offload_tx_stream_get_dma_chan - Get the DMA channel for the TX stream
+ * @spi: SPI device
+ * @id: Function ID if SPI device uses more than one offload or NULL.
+ *
+ * This is the DMA channel that will provide data to transfers that use the
+ * %SPI_OFFLOAD_XFER_TX_STREAM offload flag.
+ *
+ * The caller is responsible for calling dma_release_channel() on the returned
+ * DMA channel.
+ *
+ * Return: The DMA channel for the TX stream, or negative error code
+ */
+static inline struct dma_chan
+*spi_offload_tx_stream_get_dma_chan(struct spi_device *spi, const char *id)
+{
+	struct spi_controller *ctlr = spi->controller;
+
+	if (!ctlr->offload_ops || !ctlr->offload_ops->tx_stream_get_dma_chan)
+		return ERR_PTR(-EOPNOTSUPP);
+
+	return ctlr->offload_ops->tx_stream_get_dma_chan(spi, id);
+}
+
+/**
+ * spi_offload_rx_stream_get_dma_chan - Get the DMA channel for the RX stream
+ * @spi: SPI device
+ * @id: Function ID if SPI device uses more than one offload or NULL.
+ *
+ * This is the DMA channel that will receive data from transfers that use the
+ * %SPI_OFFLOAD_XFER_RX_STREAM offload flag.
+ *
+ * The caller is responsible for calling dma_release_channel() on the returned
+ * DMA channel.
+ *
+ * Return: The DMA channel for the RX stream, or negative error code
+ */
+static inline struct dma_chan
+*spi_offload_rx_stream_get_dma_chan(struct spi_device *spi, const char *id)
+{
+	struct spi_controller *ctlr = spi->controller;
+
+	if (!ctlr->offload_ops || !ctlr->offload_ops->rx_stream_get_dma_chan)
+		return ERR_PTR(-EOPNOTSUPP);
+
+	return ctlr->offload_ops->rx_stream_get_dma_chan(spi, id);
 }
 
 /*---------------------------------------------------------------------------*/
