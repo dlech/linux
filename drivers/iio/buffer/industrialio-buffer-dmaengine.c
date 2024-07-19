@@ -163,32 +163,34 @@ static const struct iio_dev_attr *iio_dmaengine_buffer_attrs[] = {
 /**
  * iio_dmaengine_buffer_alloc() - Allocate new buffer which uses DMAengine
  * @dev: Parent device for the buffer
- * @channel: DMA channel name, typically "rx".
+ * @chan: DMA channel.
  *
  * This allocates a new IIO buffer which internally uses the DMAengine framework
  * to perform its transfers. The parent device will be used to request the DMA
  * channel.
  *
+ * This "steals" the @chan pointer, so the caller must not call
+ * dma_release_channel() on it. @chan is also checked for error, so callers
+ * can pass the result of dma_request_chan() directly.
+ *
  * Once done using the buffer iio_dmaengine_buffer_free() should be used to
  * release it.
  */
 static struct iio_buffer *iio_dmaengine_buffer_alloc(struct device *dev,
-	const char *channel)
+						     struct dma_chan *chan)
 {
 	struct dmaengine_buffer *dmaengine_buffer;
 	unsigned int width, src_width, dest_width;
 	struct dma_slave_caps caps;
-	struct dma_chan *chan;
 	int ret;
 
-	dmaengine_buffer = kzalloc(sizeof(*dmaengine_buffer), GFP_KERNEL);
-	if (!dmaengine_buffer)
-		return ERR_PTR(-ENOMEM);
+	if (IS_ERR(chan))
+		return ERR_CAST(chan);
 
-	chan = dma_request_chan(dev, channel);
-	if (IS_ERR(chan)) {
-		ret = PTR_ERR(chan);
-		goto err_free;
+	dmaengine_buffer = kzalloc(sizeof(*dmaengine_buffer), GFP_KERNEL);
+	if (!dmaengine_buffer) {
+		ret = -ENOMEM;
+		goto err_release;
 	}
 
 	ret = dma_get_slave_caps(chan, &caps);
@@ -221,6 +223,9 @@ static struct iio_buffer *iio_dmaengine_buffer_alloc(struct device *dev,
 
 err_free:
 	kfree(dmaengine_buffer);
+err_release:
+	dma_release_channel(chan);
+
 	return ERR_PTR(ret);
 }
 
@@ -244,13 +249,13 @@ EXPORT_SYMBOL_NS_GPL(iio_dmaengine_buffer_free, IIO_DMAENGINE_BUFFER);
 
 struct iio_buffer *iio_dmaengine_buffer_setup_ext(struct device *dev,
 						  struct iio_dev *indio_dev,
-						  const char *channel,
+						  struct dma_chan *chan,
 						  enum iio_buffer_direction dir)
 {
 	struct iio_buffer *buffer;
 	int ret;
 
-	buffer = iio_dmaengine_buffer_alloc(dev, channel);
+	buffer = iio_dmaengine_buffer_alloc(dev, chan);
 	if (IS_ERR(buffer))
 		return ERR_CAST(buffer);
 
@@ -277,22 +282,26 @@ static void __devm_iio_dmaengine_buffer_free(void *buffer)
  * devm_iio_dmaengine_buffer_setup_ext() - Setup a DMA buffer for an IIO device
  * @dev: Parent device for the buffer
  * @indio_dev: IIO device to which to attach this buffer.
- * @channel: DMA channel name, typically "rx".
+ * @chan: DMA channel.
  * @dir: Direction of buffer (in or out)
  *
  * This allocates a new IIO buffer with devm_iio_dmaengine_buffer_alloc()
  * and attaches it to an IIO device with iio_device_attach_buffer().
  * It also appends the INDIO_BUFFER_HARDWARE mode to the supported modes of the
  * IIO device.
+ *
+ * This "steals" the @chan pointer, so the caller must not call
+ * dma_release_channel() on it. @chan is also checked for error, so callers
+ * can pass the result of dma_request_chan() directly.
  */
 int devm_iio_dmaengine_buffer_setup_ext(struct device *dev,
 					struct iio_dev *indio_dev,
-					const char *channel,
+					struct dma_chan *chan,
 					enum iio_buffer_direction dir)
 {
 	struct iio_buffer *buffer;
 
-	buffer = iio_dmaengine_buffer_setup_ext(dev, indio_dev, channel, dir);
+	buffer = iio_dmaengine_buffer_setup_ext(dev, indio_dev, chan, dir);
 	if (IS_ERR(buffer))
 		return PTR_ERR(buffer);
 

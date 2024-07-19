@@ -124,7 +124,8 @@ static struct iio_buffer *axi_dac_request_buffer(struct iio_backend *back,
 	if (device_property_read_string(st->dev, "dma-names", &dma_name))
 		dma_name = "tx";
 
-	return iio_dmaengine_buffer_setup_ext(st->dev, indio_dev, dma_name,
+	return iio_dmaengine_buffer_setup_ext(st->dev, indio_dev,
+					      dma_request_chan(st->dev, dma_name),
 					      IIO_BUFFER_DIRECTION_OUT);
 }
 
