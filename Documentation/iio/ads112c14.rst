@@ -1,0 +1,318 @@
+.. SPDX-License-Identifier: GPL-2.0-only
+
+==============================
+ADS112C14 and ADS122C14 family
+==============================
+
+The Texas Instruments ADS112C14 and ADS122C14 are low-power, 4-channel ADCs
+with an I2C interface. This document is a short overview of the family and the
+device tree properties used by the IIO driver.
+
+Supported devices
+=================
+
+The following chips are supported:
+
+* ``ti,ads112c14`` - 12-bit ADC
+* ``ti,ads122c14`` - 16-bit ADC
+
+Devicetree bindings
+===================
+
+See :doc:`../devicetree/bindings/iio/adc/ti,ads112c14` for the complete
+binding description.
+
+The minimal device tree node looks like this::
+
+    adc@40 {
+        compatible = "ti,ads122c14";
+        reg = <0x40>;
+        avdd-supply = <&avdd>;
+        dvdd-supply = <&dvdd>;
+
+        /* TODO: add channel@ nodes here */
+    };
+
+Effect of devicetree on registers
+---------------------------------
+
+Device properties have the following effects on registers:
+
+* ``CLK_SEL`` and ``GPIO3_CFG`` are set if the ``clocks`` property is present.
+* ``GPIO2_SRC`` may be set when ``interrupts`` and ``interrupt-names`` for
+  "fault" is present.
+* ``GPIO3_SRC`` may be set when ``interrupts`` and ``interrupt-names`` for
+  "drdy" is present.
+
+Channel-specific properties have the following effects on registers only when
+a measurement is active on the channel:
+
+* ``AINP`` and ``AINN`` are set according to the ``single-channel`` or
+  ``diff-channel`` properties of each channel.
+* ``REF_SEL`` and ``REF_VAL`` will be set according to the value of the
+  ``reference-sources`` property.
+* When ``reference-sources`` is set to "external":
+  * If ``refp-supply`` is given and not the same phandle as ``avdd-supply``,
+    ``REFP_BUF_EN`` will be set to 1, otherwise it will be 0.
+  * If ``refn-supply`` is given, ``REFN_BUF_EN`` will be set to 1, otherwise it
+    will be 0.
+* ``I1MUX`` and ``I2MUX`` will be set to the values of the ``excitation-channels``
+   property.
+* ``IUNIT``, ``I1MAG`` and ``I2MAG`` will be set to best fit according to the
+   values of the ``excitation-current-nanoamp`` property.
+* ``GC_EN`` will be set to 1 if the ``input-chopping`` property is present,
+  otherwise it will be 0.
+* ``CODING`` is set based on the ``bipolar`` property.
+* ``DELAY`` is set based on the ``settling-time-us`` property.
+
+IIO sysfs attributes
+====================
+
+Notes on channels
+-----------------
+
+* The ``SYS_MON`` channels for External reference, AVDD and VDD take the ``/ 8``
+  into account in their scale. So ``raw * scale`` will give the actual supply
+  voltage in mV, not the voltage / 8.
+
+* When the external reference is used with a resistor divider (e.g. in an RTD
+  configuration), a measurement that enables the current outputs needs to be
+  made first before the diagnostic channels can be read. Otherwise, the reading
+  will be inaccurate because there is no excitation current.
+
+Effect of attributes on registers
+---------------------------------
+
+* ``RESET`` is done during driver probe.
+* ``START`` and ``STOP`` are controlled by ``buffer0/enable``.
+
+* ``GPIOX_DAT_IN``,
+
+Filtering
+---------
+
+Filter type, oversampling ratio and sampling frequency are tightly coupled in
+these chips. To set these, first set the ``in_*_filter_type`` attribute. If the
+filter type is ``sinc4+sinc1+pf1``, set ``in_*_sampling_frequency``and then
+``in_*_filter_oversampling_ratio`` in that order. For other filter types,
+reverse the order in which these two attributes are set.
+
+Not implemented
+================
+
+* Power management (``PWDN``, ``STBY_MODE`` registers)
+
+Events:
+STATUS_EN
+FAULT_PIN_BEHAVIOR
+REF_UV_EN
+
+GPIO controller:
+GPIOx_CFG
+GPIOx_DAT_IN
+GPIOx_DAT_OUT
+
+
+.. code-block:: yaml
+
+  examples:
+    - |
+        #include <dt-bindings/iio/adc/ti,ads112c14.h>
+
+        i2c {
+            #address-cells = <1>;
+            #size-cells = <0>;
+
+            adc@40 {
+                compatible = "ti,ads112c14";
+                reg = <0x40>;
+
+                avdd-supply = <&avdd>;
+                dvdd-supply = <&dvdd>;
+
+                /* 3-Wire RTD: Two IDACs, One Measurement (AIN1-AIN2) */
+
+                ti,refp-refn-resistor-ohms = <500>;
+
+                #address-cells = <1>;
+                #size-cells = <0>;
+
+                channel@0 {
+                    reg = <0>;
+                    diff-channels = <1>, <2>;
+                    excitation-channels = <0>, <3>;
+                    excitation-current-nanoamp = <500000>, <500000>;
+                    input-chopping;
+                    reference-sources = <ADS112C14_VREF_SOURCE_EXTERNAL>;
+                };
+            };
+        };
+    - |
+        #include <dt-bindings/iio/adc/ti,ads112c14.h>
+
+        i2c {
+            #address-cells = <1>;
+            #size-cells = <0>;
+
+            adc@40 {
+                compatible = "ti,ads112c14";
+                reg = <0x40>;
+
+                avdd-supply = <&avdd>;
+                dvdd-supply = <&dvdd>;
+
+                /* 3-Wire RTD: One IDAC, Two Measurements (AIN1-AIN2, AIN2-AIN4) */
+
+                ti,refp-refn-resistor-ohms = <500>;
+
+                #address-cells = <1>;
+                #size-cells = <0>;
+
+                channel@0 {
+                    reg = <0>;
+                    diff-channels = <1>, <2>;
+                    excitation-channels = <0>;
+                    excitation-current-nanoamp = <500000>;
+                    reference-sources = <ADS112C14_VREF_SOURCE_EXTERNAL>;
+                };
+
+                channel@1 {
+                    reg = <1>;
+                    diff-channels = <2>, <4>;
+                    excitation-channels = <0>;
+                    excitation-current-nanoamp = <500000>;
+                    reference-sources = <ADS112C14_VREF_SOURCE_EXTERNAL>;
+                };
+            };
+        };
+    - |
+        #include <dt-bindings/iio/adc/ti,ads112c14.h>
+
+        i2c {
+            #address-cells = <1>;
+            #size-cells = <0>;
+
+            adc@40 {
+                compatible = "ti,ads112c14";
+                reg = <0x40>;
+
+                avdd-supply = <&avdd>;
+                dvdd-supply = <&dvdd>;
+
+                /* 2-Wire RTD: One IDAC, One Measurement (AIN1-AIN4) */
+
+                ti,refp-refn-resistor-ohms = <500>;
+
+                #address-cells = <1>;
+                #size-cells = <0>;
+
+                channel@0 {
+                    reg = <0>;
+                    diff-channels = <1>, <4>;
+                    excitation-channels = <0>;
+                    excitation-current-nanoamp = <500000>;
+                    reference-sources = <ADS112C14_VREF_SOURCE_EXTERNAL>;
+                };
+            };
+        };
+    - |
+        #include <dt-bindings/iio/adc/ti,ads112c14.h>
+
+        i2c {
+            #address-cells = <1>;
+            #size-cells = <0>;
+
+            adc@40 {
+                compatible = "ti,ads112c14";
+                reg = <0x40>;
+
+                avdd-supply = <&avdd>;
+                dvdd-supply = <&dvdd>;
+
+                /* 4-Wire RTD: One IDAC, One Measurement (AIN2-AIN3) */
+
+                ti,refp-refn-resistor-ohms = <500>;
+
+                #address-cells = <1>;
+                #size-cells = <0>;
+
+                channel@0 {
+                    reg = <0>;
+                    diff-channels = <2>, <3>;
+                    excitation-channels = <0>;
+                    excitation-current-nanoamp = <500000>;
+                    excitation-current-nanoamp = <500000>;
+                    reference-sources = <ADS112C14_VREF_SOURCE_EXTERNAL>;
+                };
+            };
+        };
+    - |
+        #include <dt-bindings/iio/adc/ti,ads112c14.h>
+
+        i2c {
+            #address-cells = <1>;
+            #size-cells = <0>;
+
+            adc@40 {
+                compatible = "ti,ads112c14";
+                reg = <0x40>;
+
+                avdd-supply = <&avdd>;
+                dvdd-supply = <&dvdd>;
+
+                /* DC269A: Thermocouple Measurement With a Thermistor for CJC */
+
+                #address-cells = <1>;
+                #size-cells = <0>;
+
+                channel@0 {
+                    reg = <0>;
+                    diff-channels = <6>, <7>;
+                    reference-sources = <ADS112C14_VREF_SOURCE_INTERNAL_2_5V>;
+                    label = "thermocouple";
+                };
+
+                channel@1 {
+                    reg = <1>;
+                    diff-channels = <1>, <2>;
+                    reference-sources = <ADS112C14_VREF_SOURCE_INTERNAL_2_5V>;
+                    label = "thermistor";
+                };
+            };
+        };
+    - |
+        #include <dt-bindings/iio/adc/ti,ads112c14.h>
+
+        i2c {
+            #address-cells = <1>;
+            #size-cells = <0>;
+
+            adc@40 {
+                compatible = "ti,ads112c14";
+                reg = <0x40>;
+
+                avdd-supply = <&avdd>;
+                dvdd-supply = <&dvdd>;
+
+                /* DC269A: Resistive Bridge Measurement With a Thermistor for Temperature Compensation*/
+
+                refp-supply = <&avdd>;
+
+                #address-cells = <1>;
+                #size-cells = <0>;
+
+                channel@0 {
+                    reg = <0>;
+                    diff-channels = <6>, <7>;
+                    reference-sources = <ADS112C14_VREF_SOURCE_EXTERNAL>;
+                    label = "bridge";
+                };
+
+                channel@1 {
+                    reg = <1>;
+                    diff-channels = <1>, <2>;
+                    reference-sources = <ADS112C14_VREF_SOURCE_INTERNAL_2_5V>;
+                    label = "thermistor";
+                };
+            };
+        };

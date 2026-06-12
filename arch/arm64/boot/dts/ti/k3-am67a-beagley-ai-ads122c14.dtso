@@ -1,0 +1,114 @@
+// SPDX-License-Identifier: GPL-2.0-only OR MIT
+/*
+ * DT overlay for ADS122C14EVM-PDK on BeagleY-AI
+ *
+ * To enable this, add it to fdtoverlays in /boot/firmware/extlinux/extlinux.conf
+ *
+ * For example:
+ *	fdtoverlays /mainline/k3-am67a-beagley-ai-ads122c14.dtbo
+ */
+
+/dts-v1/;
+/plugin/;
+
+#include "k3-pinctrl.h"
+
+/*
+ * Helper to show loaded overlays under: /proc/device-tree/chosen/overlays/
+ */
+&{/chosen} {
+	overlays {
+		k3-am67a-beagley-ai-ads122c14.kernel = __TIMESTAMP__;
+	};
+};
+
+&mcu_i2c0 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&mcu_i2c0_pins_default>;
+	clock-frequency = <100000>;
+	status = "okay";
+
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	pdk_adc: adc@40 {
+		compatible = "ti,ads122c14";
+		reg = <0x40>;
+
+		avdd-supply = <&vdd_3v3>;
+		dvdd-supply = <&vdd_3v3>;
+
+		/* Uncomment if REFP is connected to AVDD. */
+		// refp-supply = <&vdd_3v3>;
+
+		/* Uncomment when REFP (R20) has constant current. */
+		ti,refp-refn-resistor-ohms = <4020>;
+
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		gpio-controller;
+		#gpio-cells = <2>;
+
+		/* 2-Wire RTD: One IDAC, One Measurement (AIN1-AIN4) */
+
+		channel@0 {
+			reg = <0>;
+
+			diff-channels = <1>, <4>;
+			excitation-channels = <0>;
+			excitation-current-nanoamp = <100000>;
+			input-chopping;
+			burn-out-current-nanoamp = <1000>;
+			reference-sources = "external";
+			label = "rtd";
+		};
+	};
+};
+
+&mcu_pmx0 {
+	mcu_i2c0_pins_default: mcu-i2c0-default-pins {
+		/* The eval board has pull-up resistors, so no PIN_INPUT_PULLUP here. */
+		pinctrl-single,pins = <
+			J722S_MCU_IOPAD(0x048, PIN_INPUT, 0) /* (E11) MCU_I2C0_SDA */
+			J722S_MCU_IOPAD(0x044, PIN_INPUT, 0) /* (B13) MCU_I2C0_SCL */
+		>;
+	};
+};
+
+/* These are present downstream, but not in mainline. */
+
+&main_gpio0 {
+	gpio-line-names = "", "", "", "", "", /* 0-4 */
+			  "", "", "", "", "", /* 5-9 */
+			  "", "", "", "", "", /* 10-14 */
+			  "", "", "", "", "", /* 15-19 */
+			  "", "", "", "", "", /* 20-24 */
+			  "", "", "", "", "", /* 25-29 */
+			  "", "", "USB_RST", "GPIO27", "", /* 30-34 */
+			  "", "GPIO26", "", "GPIO4", "", /* 35-39 */
+			  "", "GPIO22", "GPIO25", "", ""; /* 40-44 */
+};
+
+&main_gpio1 {
+	gpio-line-names = "", "", "", "", "", /* 0-4 */
+			  "", "", "GPIO16", "GPIO17", "GPIO21", /* 5-9 */
+			  "GPIO20", "GPIO18", "GPIO19", "GPIO15", "GPIO14", /* 10-14 */
+			  "GPIO5", "GPIO12", "GPIO6", "GPIO13", ""; /* 15-19 */
+};
+
+&mcu_gpio0 {
+	gpio-line-names = "GPIO8", "", "GPIO11", "GPIO10", "GPIO9", /* 0-4 */
+			  "", "", "GPIO23", "", "GPIO7", /* 5-9 */
+			  "GPIO24", "", "", "HDMI_RSTn", "HDMI_INTn", /* 10-14 */
+			  "", "", "GPIO3", "GPIO2", ""; /* 15-19 */
+};
+
+&main_pmx0 {
+	pinctrl-single,gpio-range =
+		<&main_pmx0_range 102 1 PIN_GPIO_RANGE_IOPAD>;
+
+	main_pmx0_range: gpio-range {
+		#pinctrl-single,gpio-range-cells = <3>;
+	};
+};

@@ -185,6 +185,9 @@ dtb-$(CONFIG_ARCH_K3) += k3-j721s2-evm-usb0-type-a.dtbo
 
 # Boards with J722s SoC
 dtb-$(CONFIG_ARCH_K3) += k3-am67a-beagley-ai.dtb
+dtb-$(CONFIG_ARCH_K3) += k3-am67a-beagley-ai-ads122c14.dtbo
+dtb-$(CONFIG_ARCH_K3) += k3-am67a-beagley-ai-ads122c14-clk.dtbo
+dtb-$(CONFIG_ARCH_K3) += k3-am67a-beagley-ai-ads122c14-drdy.dtbo
 dtb-$(CONFIG_ARCH_K3) += k3-j722s-evm.dtb
 dtb-$(CONFIG_ARCH_K3) += k3-j722s-evm-csi2-quad-rpi-cam-imx219.dtbo
 dtb-$(CONFIG_ARCH_K3) += k3-j722s-evm-csi2-quad-tevi-ov5640.dtbo
@@ -251,6 +254,14 @@ k3-am625-verdin-wifi-mallow-panel-cap-touch-10inch-lvds-dtbs := \
 	k3-am625-verdin-panel-cap-touch-10inch-lvds.dtbo
 k3-am62-lp-sk-hdmi-audio-dtbs := k3-am62-lp-sk.dtb k3-am62x-sk-hdmi-audio.dtbo
 k3-am62-lp-sk-nand-dtbs := k3-am62-lp-sk.dtb k3-am62-lp-sk-nand.dtbo
+k3-am67a7-beagley-ai-ads122c14-dtbs := k3-am67a-beagley-ai.dtb \
+	k3-am67a-beagley-ai-ads122c14.dtbo
+k3-am67a7-beagley-ai-ads122c14-clk-dtbs := k3-am67a-beagley-ai.dtb \
+	k3-am67a-beagley-ai-ads122c14.dtbo \
+	k3-am67a-beagley-ai-ads122c14-clk.dtbo
+k3-am67a7-beagley-ai-ads122c14-drdy-dtbs := k3-am67a-beagley-ai.dtb \
+	k3-am67a-beagley-ai-ads122c14.dtbo \
+	k3-am67a-beagley-ai-ads122c14-drdy.dtbo
 k3-am62a7-phyboard-lyra-disable-eth-phy-dtbs := k3-am62a7-phyboard-lyra-rdk.dtb \
 	k3-am6xx-phycore-disable-eth-phy.dtbo
 k3-am62a7-phyboard-lyra-disable-rtc-dtbs := k3-am62a7-phyboard-lyra-rdk.dtb \
@@ -361,6 +372,9 @@ dtb- += k3-am625-beagleplay-csi2-ov5640.dtb \
 	k3-am625-verdin-wifi-mallow-panel-cap-touch-10inch-lvds.dtb \
 	k3-am62-lp-sk-hdmi-audio.dtb \
 	k3-am62-lp-sk-nand.dtb \
+	k3-am67a7-beagley-ai-ads122c14.dtb \
+	k3-am67a7-beagley-ai-ads122c14-clk.dtb \
+	k3-am67a7-beagley-ai-ads122c14-drdy.dtb \
 	k3-am62a7-phyboard-lyra-disable-eth-phy.dtb \
 	k3-am62a7-phyboard-lyra-disable-rtc.dtb \
 	k3-am62a7-phyboard-lyra-disable-spi-nor.dtb \

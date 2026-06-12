@@ -1,0 +1,48 @@
+// SPDX-License-Identifier: GPL-2.0-only OR MIT
+/*
+ * DT overlay for ADS122C14EVM-PDK on BeagleY-AI
+ *
+ * Apply this overlay after k3-am67a-beagley-ai-ads122c14.dtbo to modify it
+ * to use the GPIO3 pin for the /DRDY interrupt. This assumes the board has
+ * been modified if needed and is correctly wired.
+ *
+ * To enable this, add it to fdtoverlays in /boot/firmware/extlinux/extlinux.conf
+ *
+ * For example:
+ *	fdtoverlays /mainline/k3-am67a-beagley-ai-ads122c14.dtbo /mainline/k3-am67a-beagley-ai-ads122c14-drdy.dtbo 
+ */
+
+/dts-v1/;
+/plugin/;
+
+/*
+ * Helper to show loaded overlays under: /proc/device-tree/chosen/overlays/
+ */
+&{/chosen} {
+	overlays {
+		k3-am67a-beagley-ai-ads122c14-drdy.kernel = __TIMESTAMP__;
+	};
+};
+
+#include <dt-bindings/interrupt-controller/irq.h>
+
+#include "k3-pinctrl.h"
+
+&mcu_i2c0 {
+	pinctrl-0 = <&mcu_i2c0_pins_default>, <&hat_07_gpio>;
+};
+
+&pdk_adc {
+	interrupt-parent = <&main_gpio0>;
+	interrupts = <38 IRQ_TYPE_EDGE_FALLING>;
+	interrupt-names = "drdy";
+};
+
+&main_pmx0 {
+	/* Configure GPIO4 (40-pin header pin 7) for GPIO for interrupt. */
+	hat_07_gpio: hat-07-gpio-pins {
+		pinctrl-single,pins = <
+			J722S_IOPAD(0x09C, PIN_INPUT, 7) /* (W26) GPMC0_WAIT1.GPIO0_38 */
+		>;
+	};
+};

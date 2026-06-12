@@ -35,6 +35,7 @@ Industrial I/O Kernel Drivers
    adis16475
    adis16480
    adis16550
+   ads112c14
    adxl313
    adxl380
    adxl345

@@ -1,0 +1,37 @@
+// SPDX-License-Identifier: GPL-2.0-only OR MIT
+/*
+ * DT overlay for ADS122C14EVM-PDK on BeagleY-AI
+ *
+ * Apply this overlay after k3-am67a-beagley-ai-ads122c14.dtso to modify it
+ * to use an external clock.
+ *
+ * To enable this, add it to fdtoverlays in /boot/firmware/extlinux/extlinux.conf
+ *
+ * For example:
+ *	fdtoverlays /mainline/k3-am67a-beagley-ai-ads122c14.dtbo /mainline/k3-am67a-beagley-ai-ads122c14-clk.dtbo 
+ */
+
+/dts-v1/;
+/plugin/;
+
+/*
+ * Helper to show loaded overlays under: /proc/device-tree/chosen/overlays/
+ */
+&{/chosen} {
+	overlays {
+		k3-am67a-beagley-ai-ads122c14-clk.kernel = __TIMESTAMP__;
+	};
+};
+
+&{/} {
+	adc_ext_clk: adc-ext-clk {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		/* Adjust for actual clock frequency. */
+		clock-frequency = <4069000>;
+	};
+};
+
+&pdk_adc {
+	clocks = <&adc_ext_clk>;
+};
