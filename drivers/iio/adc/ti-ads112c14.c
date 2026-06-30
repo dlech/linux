@@ -10,6 +10,7 @@
 
 #include <linux/bitfield.h>
 #include <linux/cleanup.h>
+#include <linux/clk.h>
 #include <linux/crc8.h>
 #include <linux/delay.h>
 #include <linux/dev_printk.h>
@@ -122,6 +123,10 @@
 #define   ADS112C14_GPIO_CFG_GPIO2_CFG			GENMASK(5, 4)
 #define   ADS112C14_GPIO_CFG_GPIO1_CFG			GENMASK(3, 2)
 #define   ADS112C14_GPIO_CFG_GPIO0_CFG			GENMASK(1, 0)
+#define     ADS112C14_GPIO_CFG_GPIO_CFG_DISABLED	  0
+#define     ADS112C14_GPIO_CFG_GPIO_CFG_INPUT		  1
+#define     ADS112C14_GPIO_CFG_GPIO_CFG_PUSH_PULL_OUT	  2
+#define     ADS112C14_GPIO_CFG_GPIO_CFG_OPEN_DRAIN_OUT	  3
 
 #define ADS112C14_REG_GPIO_DATA_OUTPUT			0x0C
 #define   ADS112C14_GPIO_DATA_OUTPUT_GPIO3_SRC		BIT(7)
@@ -167,6 +172,8 @@ static const u32 ads112c14_pga_gains_x10[] = {
 	5, 10, 20, 40, 50, 80, 100, 160,		/* 0 -  7 */
 	200, 320, 500, 640, 1000, 1280, 2000, 2560,	/* 8 - 15 */
 };
+
+#define ADS112C14_INTERNAL_CLK_Hz 4096000
 
 #define ADS112C14_I2C_CRC8_POLYNOMIAL 0x07
 DECLARE_CRC8_TABLE(ads112c14_crc8_table);
@@ -257,6 +264,7 @@ struct ads112c14_data {
 	struct regmap *regmap;
 	/* Synchronizes access to register value fields. */
 	struct mutex lock;
+	long fclk_Hz;
 	bool i2c_crc_enabled;
 	u32 avdd_uV;
 	u32 ext_ref_uV;
@@ -1342,6 +1350,7 @@ static int ads112c14_probe(struct i2c_client *client)
 	const struct ads112c14_chip_info *info;
 	struct iio_dev *indio_dev;
 	struct ads112c14_data *data;
+	struct clk *clk;
 	bool need_avdd_ref, need_ext_ref;
 	u32 refp_uV = 0;
 	u32 refn_uV = 0;
@@ -1434,6 +1443,12 @@ static int ads112c14_probe(struct i2c_client *client)
 		return dev_err_probe(dev, -EINVAL,
 				     "external reference measurements require either refp-supply or ti,refp-refn-resistor-ohms property\n");
 
+	clk = devm_clk_get_optional_enabled(dev, NULL);
+	if (IS_ERR(clk))
+		return dev_err_probe(dev, PTR_ERR(clk), "failed to get clk\n");
+
+	data->fclk_Hz = clk ? clk_get_rate(clk) : ADS112C14_INTERNAL_CLK_Hz;
+
 	/* It takes some time for the internal reference to stabilize. */
 	fsleep(10 * USEC_PER_MSEC);
 
@@ -1498,6 +1513,20 @@ static int ads112c14_probe(struct i2c_client *client)
 					    ADS112C14_DEVICE_CFG_CONV_MODE_SINGLE_SHOT));
 	if (ret)
 		return ret;
+
+	if (clk) {
+		ret = regmap_update_bits(data->regmap, ADS112C14_REG_GPIO_CFG,
+					 ADS112C14_GPIO_CFG_GPIO3_CFG,
+					 FIELD_PREP(ADS112C14_GPIO_CFG_GPIO3_CFG,
+						    ADS112C14_GPIO_CFG_GPIO_CFG_INPUT));
+		if (ret)
+			return ret;
+
+		ret = regmap_set_bits(data->regmap, ADS112C14_REG_DEVICE_CFG,
+				      ADS112C14_DEVICE_CFG_CLK_SEL);
+		if (ret)
+			return ret;
+	}
 
 	ads112c14_populate_tables(data);
 
