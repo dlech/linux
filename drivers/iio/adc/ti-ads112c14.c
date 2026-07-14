@@ -11,10 +11,12 @@
 #include <linux/bitfield.h>
 #include <linux/cleanup.h>
 #include <linux/clk.h>
+#include <linux/completion.h>
 #include <linux/crc8.h>
 #include <linux/delay.h>
 #include <linux/dev_printk.h>
 #include <linux/device/devres.h>
+#include <linux/interrupt.h>
 #include <linux/i2c.h>
 #include <linux/iio/buffer.h>
 #include <linux/iio/iio.h>
@@ -138,6 +140,8 @@
 
 #define ADS112C14_REG_GPIO_DATA_OUTPUT			0x0C
 #define   ADS112C14_GPIO_DATA_OUTPUT_GPIO3_SRC		BIT(7)
+#define     ADS112C14_GPIO_DATA_OUTPUT_GPIO3_SRC_DAT_OUT  0
+#define     ADS112C14_GPIO_DATA_OUTPUT_GPIO3_SRC_DRDY	  1
 #define   ADS112C14_GPIO_DATA_OUTPUT_GPIO2_SRC		BIT(6)
 #define   ADS112C14_GPIO_DATA_OUTPUT_GPIO3_DAT_OUT	BIT(3)
 #define   ADS112C14_GPIO_DATA_OUTPUT_GPIO2_DAT_OUT	BIT(2)
@@ -361,6 +365,8 @@ struct ads112c14_data {
 	/* Synchronizes access to register value fields. */
 	struct mutex lock;
 	long fclk_Hz;
+	int drdy_irq;
+	struct completion drdy_completion;
 	bool i2c_crc_enabled;
 	u32 avdd_uV;
 	u32 ext_ref_uV;
@@ -380,6 +386,15 @@ struct ads112c14_data {
 	IIO_DECLARE_BUFFER_WITH_TS(__be32, scan, ADS112C14_MAX_MEASUREMENT_CHANNELS +
 						 ARRAY_SIZE(ads112c14_sys_mon_channels));
 };
+
+static irqreturn_t ads112c14_drdy_irq_handler(int irq, void *private)
+{
+	struct ads112c14_data *data = private;
+
+	complete(&data->drdy_completion);
+
+	return IRQ_HANDLED;
+}
 
 static bool ads112c14_writeable_reg(struct device *dev, unsigned int reg)
 {
@@ -991,6 +1006,11 @@ static int ads112c14_single_conversion(struct ads112c14_data *data,
 			return ret;
 	}
 
+	if (data->drdy_irq) {
+		reinit_completion(&data->drdy_completion);
+		enable_irq(data->drdy_irq);
+	}
+
 	ret = regmap_write(data->regmap, ADS112C14_REG_CONVERSION_CTRL,
 			   ADS112C14_CONVERSION_CTRL_START);
 	if (ret)
@@ -1009,13 +1029,25 @@ static int ads112c14_single_conversion(struct ads112c14_data *data,
 		settle_time_us *= 2;
 
 	/* Give it 1ms more than calculated settling time. */
-	ret = regmap_read_poll_timeout(data->regmap,
-				       ADS112C14_REG_STATUS_MSB, reg_val,
-				       FIELD_GET(ADS112C14_STATUS_MSB_DRDY, reg_val),
-				       1 * USEC_PER_MSEC, settle_time_us +
-							  1 * USEC_PER_MSEC);
-	if (ret)
-		return ret;
+	settle_time_us += USEC_PER_MSEC;
+
+	if (data->drdy_irq) {
+		unsigned long timeout = usecs_to_jiffies(settle_time_us);
+
+		if (!wait_for_completion_timeout(&data->drdy_completion, timeout)) {
+			disable_irq(data->drdy_irq);
+			return -ETIMEDOUT;
+		}
+
+		disable_irq(data->drdy_irq);
+	} else {
+		ret = regmap_read_poll_timeout(data->regmap,
+					       ADS112C14_REG_STATUS_MSB, reg_val,
+					       FIELD_GET(ADS112C14_STATUS_MSB_DRDY, reg_val),
+					       1 * USEC_PER_MSEC, settle_time_us);
+		if (ret)
+			return ret;
+	}
 
 	/*
 	 * When doing buffered read, we don't check the CRC, but rather pass it
@@ -2313,6 +2345,42 @@ static int ads112c14_probe(struct i2c_client *client)
 
 		ret = regmap_set_bits(data->regmap, ADS112C14_REG_DEVICE_CFG,
 				      ADS112C14_DEVICE_CFG_CLK_SEL);
+		if (ret)
+			return ret;
+	}
+
+	if (device_property_present(dev, "interrupts")) {
+		data->drdy_irq = fwnode_irq_get_byname(dev_fwnode(dev), "drdy");
+		if (data->drdy_irq < 0)
+			return dev_err_probe(dev, data->drdy_irq,
+					     "failed to get drdy interrupt\n");
+
+		if (clk)
+			return dev_err_probe(dev, -EINVAL,
+					     "drdy interrupt conflicts with external clock on GPIO3\n");
+
+		init_completion(&data->drdy_completion);
+
+		ret = devm_request_irq(dev, data->drdy_irq, ads112c14_drdy_irq_handler,
+				       IRQF_NO_AUTOEN, dev_name(dev), data);
+		if (ret)
+			return ret;
+
+		/*
+		 * REVISIT: would probably need to implement a pin controller in
+		 * order to support open drain option here.
+		 */
+		ret = regmap_update_bits(data->regmap, ADS112C14_REG_GPIO_CFG,
+					 ADS112C14_GPIO_CFG_GPIO3_CFG,
+					 FIELD_PREP(ADS112C14_GPIO_CFG_GPIO3_CFG,
+						    ADS112C14_GPIO_CFG_GPIO_CFG_PUSH_PULL_OUT));
+		if (ret)
+			return ret;
+
+		ret = regmap_update_bits(data->regmap, ADS112C14_REG_GPIO_DATA_OUTPUT,
+					 ADS112C14_GPIO_DATA_OUTPUT_GPIO3_SRC,
+					 FIELD_PREP(ADS112C14_GPIO_DATA_OUTPUT_GPIO3_SRC,
+						    ADS112C14_GPIO_DATA_OUTPUT_GPIO3_SRC_DRDY));
 		if (ret)
 			return ret;
 	}
