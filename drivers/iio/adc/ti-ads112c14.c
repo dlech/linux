@@ -9,6 +9,7 @@
  */
 
 #include <linux/bitfield.h>
+#include <linux/bitmap.h>
 #include <linux/cleanup.h>
 #include <linux/clk.h>
 #include <linux/completion.h>
@@ -20,6 +21,7 @@
 #include <linux/i2c.h>
 #include <linux/iio/buffer.h>
 #include <linux/iio/iio.h>
+#include <linux/iio/trigger.h>
 #include <linux/iio/trigger_consumer.h>
 #include <linux/iio/triggered_buffer.h>
 #include <linux/math64.h>
@@ -362,6 +364,7 @@ struct ads112c14_channel_state {
 struct ads112c14_data {
 	const struct ads112c14_chip_info *chip_info;
 	struct regmap *regmap;
+	struct iio_trigger *drdy_trig;
 	/* Synchronizes access to register value fields. */
 	struct mutex lock;
 	long fclk_Hz;
@@ -389,12 +392,34 @@ struct ads112c14_data {
 
 static irqreturn_t ads112c14_drdy_irq_handler(int irq, void *private)
 {
-	struct ads112c14_data *data = private;
+	struct iio_dev *indio_dev = private;
+	struct ads112c14_data *data = iio_priv(indio_dev);
 
-	complete(&data->drdy_completion);
+	if (iio_trigger_using_own(indio_dev))
+		iio_trigger_poll(data->drdy_trig);
+	else
+		complete(&data->drdy_completion);
 
 	return IRQ_HANDLED;
 }
+
+static int ads112c14_trigger_set_state(struct iio_trigger *trig, bool state)
+{
+	struct iio_dev *indio_dev = iio_trigger_get_drvdata(trig);
+	struct ads112c14_data *data = iio_priv(indio_dev);
+
+	if (state)
+		enable_irq(data->drdy_irq);
+	else
+		disable_irq(data->drdy_irq);
+
+	return 0;
+}
+
+static const struct iio_trigger_ops ads112c14_trigger_ops = {
+	.set_trigger_state = ads112c14_trigger_set_state,
+	.validate_device = iio_trigger_validate_own_device,
+};
 
 static bool ads112c14_writeable_reg(struct device *dev, unsigned int reg)
 {
@@ -978,6 +1003,30 @@ static int ads112c14_prepare_sys_mon_channel(struct ads112c14_data *data,
 	return 0;
 }
 
+static int ads112c14_prepare_channel(struct ads112c14_data *data,
+				     const struct iio_chan_spec *chan,
+				     bool en_burnout)
+{
+	if (chan->channel < ADS112C14_SYS_MON_CHANNEL_BASE)
+		return ads112c14_prepare_measurement_channel(data, chan, en_burnout);
+
+	return ads112c14_prepare_sys_mon_channel(data, chan);
+}
+
+static int ads112c14_scan_read(struct ads112c14_data *data, u8 *buf)
+{
+	struct i2c_client *client = to_i2c_client(regmap_get_device(data->regmap));
+	u8 len = BITS_TO_BYTES(data->chip_info->resolution_bits) +
+		 (data->i2c_crc_enabled ? 1 : 0);
+	int ret;
+
+	ret = i2c_smbus_read_i2c_block_data(client, ADS112C14_CMD_RDATA, len, buf);
+	if (ret < 0)
+		return ret;
+
+	return 0;
+}
+
 static int ads112c14_single_conversion(struct ads112c14_data *data,
 				       const struct iio_chan_spec *chan,
 				       u8 *buf, bool en_burnout, bool for_scan)
@@ -996,15 +1045,9 @@ static int ads112c14_single_conversion(struct ads112c14_data *data,
 	if (ret)
 		return ret;
 
-	if (chan->channel < ADS112C14_SYS_MON_CHANNEL_BASE) {
-		ret = ads112c14_prepare_measurement_channel(data, chan, en_burnout);
-		if (ret)
-			return ret;
-	} else {
-		ret = ads112c14_prepare_sys_mon_channel(data, chan);
-		if (ret)
-			return ret;
-	}
+	ret = ads112c14_prepare_channel(data, chan, en_burnout);
+	if (ret)
+		return ret;
 
 	if (data->drdy_irq) {
 		reinit_completion(&data->drdy_completion);
@@ -1055,17 +1098,8 @@ static int ads112c14_single_conversion(struct ads112c14_data *data,
 	 * with CRC errors, but rather leave it to userspace to decide what to
 	 * do.
 	 */
-	if (for_scan) {
-		u8 len = BITS_TO_BYTES(data->chip_info->resolution_bits) +
-			 (data->i2c_crc_enabled ? 1 : 0);
-
-		ret = i2c_smbus_read_i2c_block_data(client, ADS112C14_CMD_RDATA,
-						    len, buf);
-		if (ret < 0)
-			return ret;
-
-		return 0;
-	}
+	if (for_scan)
+		return ads112c14_scan_read(data, buf);
 
 	return ads112c14_i2c_read_bytes(client, ADS112C14_CMD_RDATA, buf,
 					BITS_TO_BYTES(data->chip_info->resolution_bits),
@@ -1521,9 +1555,30 @@ static irqreturn_t ads112c14_trigger_handler(int irq, void *private)
 	struct iio_poll_func *pf = private;
 	struct iio_dev *indio_dev = pf->indio_dev;
 	struct ads112c14_data *data = iio_priv(indio_dev);
+	unsigned int scan_mask_len = iio_get_masklength(indio_dev);
 	u32 offset = 0;
 	u32 i;
 	int ret;
+
+	if (iio_trigger_using_own(indio_dev)) {
+		i = find_first_bit(indio_dev->active_scan_mask, scan_mask_len);
+		if (i >= scan_mask_len)
+			goto out;
+
+		ret = ads112c14_scan_read(data, (u8 *)&data->scan[0]);
+		if (ret) {
+			const struct iio_chan_spec *chan = &indio_dev->channels[i];
+
+			dev_err_once(indio_dev->dev.parent,
+				     "failed to read channel %d: %pe; additional errors will be suppressed\n",
+				     chan->channel, ERR_PTR(ret));
+			goto out;
+		}
+
+		iio_push_to_buffers_with_ts(indio_dev, data->scan,
+					    sizeof(data->scan), pf->timestamp);
+		goto out;
+	}
 
 	iio_for_each_active_channel(indio_dev, i) {
 		const struct iio_chan_spec *chan = &indio_dev->channels[i];
@@ -1554,6 +1609,90 @@ static const struct iio_info ads112c14_info = {
 	.write_raw_get_fmt = ads112c14_write_raw_get_fmt,
 	.debugfs_reg_access = ads112c14_debugfs_reg_access,
 	.read_label = ads112c14_read_label,
+};
+
+static bool ads112c14_using_drdy_trigger(struct iio_dev *indio_dev)
+{
+	struct ads112c14_data *data = iio_priv(indio_dev);
+
+	return data->drdy_trig && indio_dev->trig == data->drdy_trig;
+}
+
+static bool ads112c14_validate_scan_mask(struct iio_dev *indio_dev,
+					 const unsigned long *mask)
+{
+	if (!ads112c14_using_drdy_trigger(indio_dev))
+		return true;
+
+	return bitmap_weight(mask, iio_get_masklength(indio_dev)) == 1;
+}
+
+static int ads112c14_buffer_postenable(struct iio_dev *indio_dev)
+{
+	struct ads112c14_data *data = iio_priv(indio_dev);
+	unsigned int scan_mask_len = iio_get_masklength(indio_dev);
+	unsigned int i;
+	const struct iio_chan_spec *chan;
+	int ret;
+
+	if (!ads112c14_using_drdy_trigger(indio_dev))
+		return 0;
+
+	i = find_first_bit(indio_dev->active_scan_mask, scan_mask_len);
+	if (i >= scan_mask_len)
+		return -EINVAL;
+
+	chan = &indio_dev->channels[i];
+
+	guard(mutex)(&data->lock);
+
+	ret = ads112c14_prepare_channel(data, chan, false);
+	if (ret)
+		return ret;
+
+	ret = regmap_assign_bits(data->regmap, ADS112C14_REG_DEVICE_CFG,
+				 ADS112C14_DEVICE_CFG_CONV_MODE,
+				 ADS112C14_DEVICE_CFG_CONV_MODE_CONTINUOUS);
+	if (ret)
+		return ret;
+
+	ret = regmap_write(data->regmap, ADS112C14_REG_CONVERSION_CTRL,
+			   ADS112C14_CONVERSION_CTRL_START);
+	if (ret) {
+		regmap_assign_bits(data->regmap, ADS112C14_REG_DEVICE_CFG,
+				   ADS112C14_DEVICE_CFG_CONV_MODE,
+				   ADS112C14_DEVICE_CFG_CONV_MODE_SINGLE_SHOT);
+		return ret;
+	}
+
+	return 0;
+}
+
+static int ads112c14_buffer_predisable(struct iio_dev *indio_dev)
+{
+	struct ads112c14_data *data = iio_priv(indio_dev);
+	int ret, ret2;
+
+	if (!ads112c14_using_drdy_trigger(indio_dev))
+		return 0;
+
+	guard(mutex)(&data->lock);
+
+	ret = regmap_write(data->regmap, ADS112C14_REG_CONVERSION_CTRL,
+			   ADS112C14_CONVERSION_CTRL_STOP);
+	ret2 = regmap_assign_bits(data->regmap, ADS112C14_REG_DEVICE_CFG,
+				  ADS112C14_DEVICE_CFG_CONV_MODE,
+				  ADS112C14_DEVICE_CFG_CONV_MODE_SINGLE_SHOT);
+	if (ret2)
+		return ret2;
+
+	return ret;
+}
+
+static const struct iio_buffer_setup_ops ads112c14_buffer_setup_ops = {
+	.postenable = ads112c14_buffer_postenable,
+	.predisable = ads112c14_buffer_predisable,
+	.validate_scan_mask = ads112c14_validate_scan_mask,
 };
 
 static int ads112c14_get_filter_type_from_state(struct ads112c14_channel_state *channel_state)
@@ -2362,9 +2501,24 @@ static int ads112c14_probe(struct i2c_client *client)
 		init_completion(&data->drdy_completion);
 
 		ret = devm_request_irq(dev, data->drdy_irq, ads112c14_drdy_irq_handler,
-				       IRQF_NO_AUTOEN, dev_name(dev), data);
+				       IRQF_NO_AUTOEN, dev_name(dev), indio_dev);
 		if (ret)
 			return ret;
+
+		data->drdy_trig = devm_iio_trigger_alloc(dev, "%s-dev%d-drdy",
+							 info->name,
+							 iio_device_id(indio_dev));
+		if (!data->drdy_trig)
+			return -ENOMEM;
+
+		data->drdy_trig->ops = &ads112c14_trigger_ops;
+		iio_trigger_set_drvdata(data->drdy_trig, indio_dev);
+
+		ret = devm_iio_trigger_register(dev, data->drdy_trig);
+		if (ret)
+			return ret;
+
+		indio_dev->trig = iio_trigger_get(data->drdy_trig);
 
 		/*
 		 * REVISIT: would probably need to implement a pin controller in
@@ -2393,7 +2547,8 @@ static int ads112c14_probe(struct i2c_client *client)
 
 	ret = devm_iio_triggered_buffer_setup(dev, indio_dev,
 					      iio_pollfunc_store_time,
-					      ads112c14_trigger_handler, NULL);
+					      ads112c14_trigger_handler,
+					      &ads112c14_buffer_setup_ops);
 	if (ret)
 		return ret;
 
