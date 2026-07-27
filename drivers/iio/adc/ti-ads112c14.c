@@ -17,6 +17,7 @@
 #include <linux/delay.h>
 #include <linux/dev_printk.h>
 #include <linux/device/devres.h>
+#include <linux/gpio/driver.h>
 #include <linux/interrupt.h>
 #include <linux/i2c.h>
 #include <linux/iio/buffer.h>
@@ -64,10 +65,7 @@
 
 #define ADS112C14_REG_STATUS_LSB			0x03
 #define   ADS112C14_STATUS_LSB_CONV_COUNT		GENMASK(7, 4)
-#define   ADS112C14_STATUS_LSB_GPIO3_DAT_IN		BIT(3)
-#define   ADS112C14_STATUS_LSB_GPIO2_DAT_IN		BIT(2)
-#define   ADS112C14_STATUS_LSB_GPIO1_DAT_IN		BIT(1)
-#define   ADS112C14_STATUS_LSB_GPIO0_DAT_IN		BIT(0)
+#define   ADS112C14_STATUS_LSB_GPIO_DAT_IN(n)		BIT(n)
 
 #define ADS112C14_REG_CONVERSION_CTRL			0x04
 #define   ADS112C14_CONVERSION_CTRL_RESET		GENMASK(7, 2)
@@ -132,10 +130,7 @@
 #define   ADS112C14_DIGITAL_CFG_CODING			BIT(1)
 
 #define ADS112C14_REG_GPIO_CFG				0x0B
-#define   ADS112C14_GPIO_CFG_GPIO3_CFG			GENMASK(7, 6)
-#define   ADS112C14_GPIO_CFG_GPIO2_CFG			GENMASK(5, 4)
-#define   ADS112C14_GPIO_CFG_GPIO1_CFG			GENMASK(3, 2)
-#define   ADS112C14_GPIO_CFG_GPIO0_CFG			GENMASK(1, 0)
+#define   ADS112C14_GPIO_CFG_GPIO_CFG(n)		(GENMASK(1, 0) << (2 * (n)))
 #define     ADS112C14_GPIO_CFG_GPIO_CFG_DISABLED	  0
 #define     ADS112C14_GPIO_CFG_GPIO_CFG_INPUT		  1
 #define     ADS112C14_GPIO_CFG_GPIO_CFG_PUSH_PULL_OUT	  2
@@ -146,10 +141,7 @@
 #define     ADS112C14_GPIO_DATA_OUTPUT_GPIO3_SRC_DAT_OUT  0
 #define     ADS112C14_GPIO_DATA_OUTPUT_GPIO3_SRC_DRDY	  1
 #define   ADS112C14_GPIO_DATA_OUTPUT_GPIO2_SRC		BIT(6)
-#define   ADS112C14_GPIO_DATA_OUTPUT_GPIO3_DAT_OUT	BIT(3)
-#define   ADS112C14_GPIO_DATA_OUTPUT_GPIO2_DAT_OUT	BIT(2)
-#define   ADS112C14_GPIO_DATA_OUTPUT_GPIO1_DAT_OUT	BIT(1)
-#define   ADS112C14_GPIO_DATA_OUTPUT_GPIO0_DAT_OUT	BIT(0)
+#define   ADS112C14_GPIO_DATA_OUTPUT_GPIO_DAT_OUT(n)	BIT(n)
 
 #define ADS112C14_REG_IDAC_MAG_CFG			0x0D
 #define   ADS112C14_IDAC_MAG_CFG_I2MAG			GENMASK(7, 4)
@@ -164,6 +156,8 @@
 
 #define ADS112C14_INT_REF0_mV				1250
 #define ADS112C14_INT_REF1_mV				2500
+
+#define ADS112C14_NUM_GPIO				4
 
 enum {
 	ADS112C14_VREF_SOURCE_INTERNAL_2_5V,
@@ -377,6 +371,9 @@ struct ads112c14_channel_state {
 struct ads112c14_data {
 	const struct ads112c14_chip_info *chip_info;
 	struct regmap *regmap;
+	struct gpio_chip gc;
+	const char *gpio_names[ADS112C14_NUM_GPIO];
+	DECLARE_BITMAP(gpio_reserved_mask, ADS112C14_NUM_GPIO);
 	struct iio_trigger *drdy_trig;
 	/* Synchronizes access to register value fields. */
 	struct mutex lock;
@@ -406,6 +403,135 @@ struct ads112c14_data {
 	IIO_DECLARE_BUFFER_WITH_TS(__be32, scan, ADS112C14_MAX_MEASUREMENT_CHANNELS +
 						 ARRAY_SIZE(ads112c14_sys_mon_channels));
 };
+
+static void ads112c14_reserve_gpio_for_ain(unsigned long *gpio_reserved_mask,
+					   u32 ain)
+{
+	if (ain >= 4 && ain <= 7)
+		set_bit(ain - 4, gpio_reserved_mask);
+}
+
+static int ads112c14_gpio_get_direction(struct gpio_chip *gc, unsigned int offset)
+{
+	struct iio_dev *indio_dev = gpiochip_get_data(gc);
+	struct ads112c14_data *data = iio_priv(indio_dev);
+	unsigned int reg_val;
+	int ret;
+
+	ret = regmap_read(data->regmap, ADS112C14_REG_GPIO_CFG, &reg_val);
+	if (ret)
+		return ret;
+
+	switch (field_get(ADS112C14_GPIO_CFG_GPIO_CFG(offset), reg_val)) {
+	case ADS112C14_GPIO_CFG_GPIO_CFG_INPUT:
+		return GPIO_LINE_DIRECTION_IN;
+	case ADS112C14_GPIO_CFG_GPIO_CFG_PUSH_PULL_OUT:
+	case ADS112C14_GPIO_CFG_GPIO_CFG_OPEN_DRAIN_OUT:
+		return GPIO_LINE_DIRECTION_OUT;
+	default:
+		return -EINVAL;
+	}
+}
+
+static int ads112c14_gpio_direction_input(struct gpio_chip *gc,
+					  unsigned int offset)
+{
+	struct iio_dev *indio_dev = gpiochip_get_data(gc);
+	struct ads112c14_data *data = iio_priv(indio_dev);
+
+	return regmap_update_bits(data->regmap, ADS112C14_REG_GPIO_CFG,
+				  ADS112C14_GPIO_CFG_GPIO_CFG(offset),
+				  field_prep(ADS112C14_GPIO_CFG_GPIO_CFG(offset),
+					     ADS112C14_GPIO_CFG_GPIO_CFG_INPUT));
+}
+
+static int ads112c14_gpio_direction_output(struct gpio_chip *gc,
+					   unsigned int offset, int value)
+{
+	struct iio_dev *indio_dev = gpiochip_get_data(gc);
+	struct ads112c14_data *data = iio_priv(indio_dev);
+	int ret;
+
+	ret = regmap_assign_bits(data->regmap, ADS112C14_REG_GPIO_DATA_OUTPUT,
+				 ADS112C14_GPIO_DATA_OUTPUT_GPIO_DAT_OUT(offset),
+				 value);
+	if (ret)
+		return ret;
+
+	return regmap_update_bits(data->regmap, ADS112C14_REG_GPIO_CFG,
+				  ADS112C14_GPIO_CFG_GPIO_CFG(offset),
+				  field_prep(ADS112C14_GPIO_CFG_GPIO_CFG(offset),
+					     ADS112C14_GPIO_CFG_GPIO_CFG_PUSH_PULL_OUT));
+}
+
+static int ads112c14_gpio_get(struct gpio_chip *gc, unsigned int offset)
+{
+	struct iio_dev *indio_dev = gpiochip_get_data(gc);
+	struct ads112c14_data *data = iio_priv(indio_dev);
+	unsigned int reg_val;
+	int ret;
+
+	ret = regmap_read(data->regmap, ADS112C14_REG_STATUS_LSB, &reg_val);
+	if (ret)
+		return ret;
+
+	return field_get(ADS112C14_STATUS_LSB_GPIO_DAT_IN(offset), reg_val);
+}
+
+static int ads112c14_gpio_set(struct gpio_chip *gc, unsigned int offset,
+			      int value)
+{
+	struct iio_dev *indio_dev = gpiochip_get_data(gc);
+	struct ads112c14_data *data = iio_priv(indio_dev);
+
+	return regmap_assign_bits(data->regmap, ADS112C14_REG_GPIO_DATA_OUTPUT,
+				  ADS112C14_GPIO_DATA_OUTPUT_GPIO_DAT_OUT(offset),
+				  value);
+}
+
+static int ads112c14_gpio_init_valid_mask(struct gpio_chip *gc,
+					  unsigned long *valid_mask,
+					  unsigned int ngpios)
+{
+	struct iio_dev *indio_dev = gpiochip_get_data(gc);
+	struct ads112c14_data *data = iio_priv(indio_dev);
+
+	bitmap_fill(valid_mask, ngpios);
+	bitmap_andnot(valid_mask, valid_mask, data->gpio_reserved_mask, ngpios);
+
+	return 0;
+}
+
+static int ads112c14_gpio_init(struct iio_dev *indio_dev)
+{
+	struct ads112c14_data *data = iio_priv(indio_dev);
+	struct device *dev = indio_dev->dev.parent;
+
+	for (u32 i = 0; i < ADS112C14_NUM_GPIO; i++) {
+		data->gpio_names[i] = devm_kasprintf(dev, GFP_KERNEL, "%s:GPIO%u",
+						     dev_name(&indio_dev->dev), i);
+		if (!data->gpio_names[i])
+			return -ENOMEM;
+	}
+
+	data->gc = (struct gpio_chip) {
+		.owner = THIS_MODULE,
+		.label = dev_name(dev),
+		.parent = dev,
+		.base = -1,
+		.ngpio = ADS112C14_NUM_GPIO,
+		.names = data->gpio_names,
+		.can_sleep = true,
+		.init_valid_mask = ads112c14_gpio_init_valid_mask,
+		.get_direction = ads112c14_gpio_get_direction,
+		.direction_input = ads112c14_gpio_direction_input,
+		.direction_output = ads112c14_gpio_direction_output,
+		.get = ads112c14_gpio_get,
+		.set = ads112c14_gpio_set,
+	};
+
+	return devm_gpiochip_add_data(dev, &data->gc, indio_dev);
+}
 
 static bool ads112c14_events_any_enabled(struct ads112c14_data *data)
 {
@@ -2065,7 +2191,8 @@ static int ads112c14_populate_idac_mag(u32 current_nA, u8 *idac_mag)
 }
 
 static int ads112c14_parse_channels(struct iio_dev *indio_dev,
-				    bool *need_avdd_ref, bool *need_ext_ref)
+				    bool *need_avdd_ref, bool *need_ext_ref,
+				    unsigned long *gpio_reserved_mask)
 {
 	struct ads112c14_data *data = iio_priv(indio_dev);
 	struct device *dev = indio_dev->dev.parent;
@@ -2132,6 +2259,8 @@ static int ads112c14_parse_channels(struct iio_dev *indio_dev,
 			 * for single-ended channels when taking measurements.
 			 */
 			spec->channel2 = ADS112C14_MUX_CFG_AIN_GND;
+
+			ads112c14_reserve_gpio_for_ain(gpio_reserved_mask, pair[0]);
 		} else if (fwnode_property_present(child, "diff-channels")) {
 			ret = fwnode_property_read_u32_array(child, "diff-channels",
 							     pair, ARRAY_SIZE(pair));
@@ -2146,6 +2275,9 @@ static int ads112c14_parse_channels(struct iio_dev *indio_dev,
 			spec->differential = 1;
 			spec->channel = pair[0];
 			spec->channel2 = pair[1];
+
+			ads112c14_reserve_gpio_for_ain(gpio_reserved_mask, pair[0]);
+			ads112c14_reserve_gpio_for_ain(gpio_reserved_mask, pair[1]);
 		} else {
 			return dev_err_probe(dev, -EINVAL,
 					     "channel node missing channel type property\n");
@@ -2176,6 +2308,10 @@ static int ads112c14_parse_channels(struct iio_dev *indio_dev,
 
 			measurement->idac1_mux = pair[0];
 			measurement->idac2_mux = measurement->iadc_count > 1 ? pair[1] : 0;
+
+			ads112c14_reserve_gpio_for_ain(gpio_reserved_mask, pair[0]);
+			if (measurement->iadc_count > 1)
+				ads112c14_reserve_gpio_for_ain(gpio_reserved_mask, pair[1]);
 
 			ret = fwnode_property_read_u32_array(child, "excitation-current-nanoamp",
 							     pair, measurement->iadc_count);
@@ -2484,6 +2620,7 @@ static int ads112c14_probe(struct i2c_client *client)
 	struct ads112c14_data *data;
 	struct clk *clk;
 	bool need_avdd_ref, need_ext_ref;
+	DECLARE_BITMAP(gpio_reserved_mask, ADS112C14_NUM_GPIO);
 	u32 refp_uV = 0;
 	u32 refn_uV = 0;
 	u32 reg_val;
@@ -2499,6 +2636,7 @@ static int ads112c14_probe(struct i2c_client *client)
 
 	data = iio_priv(indio_dev);
 	data->chip_info = info;
+	bitmap_zero(gpio_reserved_mask, ADS112C14_NUM_GPIO);
 
 	ret = devm_mutex_init(dev, &data->lock);
 	if (ret)
@@ -2512,7 +2650,8 @@ static int ads112c14_probe(struct i2c_client *client)
 					     "failed to read ti,refp-refn-resistor-ohms property\n");
 	}
 
-	ret = ads112c14_parse_channels(indio_dev, &need_avdd_ref, &need_ext_ref);
+	ret = ads112c14_parse_channels(indio_dev, &need_avdd_ref, &need_ext_ref,
+				      gpio_reserved_mask);
 	if (ret)
 		return ret;
 
@@ -2574,6 +2713,9 @@ static int ads112c14_probe(struct i2c_client *client)
 	if (need_ext_ref && !data->ext_ref_uV && !data->ext_ref_ohms)
 		return dev_err_probe(dev, -EINVAL,
 				     "external reference measurements require either refp-supply or ti,refp-refn-resistor-ohms property\n");
+
+	if (data->ext_ref_uV || data->ext_ref_ohms)
+		bitmap_set(gpio_reserved_mask, 0, 2);
 
 	clk = devm_clk_get_optional_enabled(dev, NULL);
 	if (IS_ERR(clk))
@@ -2647,9 +2789,11 @@ static int ads112c14_probe(struct i2c_client *client)
 		return ret;
 
 	if (clk) {
+		set_bit(3, gpio_reserved_mask);
+
 		ret = regmap_update_bits(data->regmap, ADS112C14_REG_GPIO_CFG,
-					 ADS112C14_GPIO_CFG_GPIO3_CFG,
-					 FIELD_PREP(ADS112C14_GPIO_CFG_GPIO3_CFG,
+					 ADS112C14_GPIO_CFG_GPIO_CFG(3),
+					 FIELD_PREP(ADS112C14_GPIO_CFG_GPIO_CFG(3),
 						    ADS112C14_GPIO_CFG_GPIO_CFG_INPUT));
 		if (ret)
 			return ret;
@@ -2661,10 +2805,15 @@ static int ads112c14_probe(struct i2c_client *client)
 	}
 
 	if (device_property_present(dev, "interrupts")) {
+		if (fwnode_irq_get_byname(dev_fwnode(dev), "fault") >= 0)
+			set_bit(2, gpio_reserved_mask);
+
 		data->drdy_irq = fwnode_irq_get_byname(dev_fwnode(dev), "drdy");
 		if (data->drdy_irq < 0)
 			return dev_err_probe(dev, data->drdy_irq,
 					     "failed to get drdy interrupt\n");
+
+		set_bit(3, gpio_reserved_mask);
 
 		if (clk)
 			return dev_err_probe(dev, -EINVAL,
@@ -2697,8 +2846,8 @@ static int ads112c14_probe(struct i2c_client *client)
 		 * order to support open drain option here.
 		 */
 		ret = regmap_update_bits(data->regmap, ADS112C14_REG_GPIO_CFG,
-					 ADS112C14_GPIO_CFG_GPIO3_CFG,
-					 FIELD_PREP(ADS112C14_GPIO_CFG_GPIO3_CFG,
+					 ADS112C14_GPIO_CFG_GPIO_CFG(3),
+					 FIELD_PREP(ADS112C14_GPIO_CFG_GPIO_CFG(3),
 						    ADS112C14_GPIO_CFG_GPIO_CFG_PUSH_PULL_OUT));
 		if (ret)
 			return ret;
@@ -2723,6 +2872,15 @@ static int ads112c14_probe(struct i2c_client *client)
 					      &ads112c14_buffer_setup_ops);
 	if (ret)
 		return ret;
+
+	if (device_property_read_bool(dev, "gpio-controller")) {
+		bitmap_copy(data->gpio_reserved_mask, gpio_reserved_mask,
+			    ADS112C14_NUM_GPIO);
+
+		ret = ads112c14_gpio_init(indio_dev);
+		if (ret)
+			return ret;
+	}
 
 	return devm_iio_device_register(dev, indio_dev);
 }
