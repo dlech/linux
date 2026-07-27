@@ -20,6 +20,7 @@
 #include <linux/interrupt.h>
 #include <linux/i2c.h>
 #include <linux/iio/buffer.h>
+#include <linux/iio/events.h>
 #include <linux/iio/iio.h>
 #include <linux/iio/trigger.h>
 #include <linux/iio/trigger_consumer.h>
@@ -265,6 +266,14 @@ enum {
 	ADS112C14_SYS_MON_CHANNEL_SHORT,
 };
 
+static const struct iio_event_spec ads112c14_uv_event[] = {
+	{
+		.type = IIO_EV_TYPE_THRESH,
+		.dir = IIO_EV_DIR_FALLING,
+		.mask_separate = BIT(IIO_EV_INFO_ENABLE),
+	},
+};
+
 static const struct iio_chan_spec_ext_info ads112c14_ext_info[];
 
 static const struct iio_chan_spec ads112c14_sys_mon_channels[] = {
@@ -293,6 +302,8 @@ static const struct iio_chan_spec ads112c14_sys_mon_channels[] = {
 				    | BIT(IIO_CHAN_INFO_OVERSAMPLING_RATIO),
 		.info_mask_separate_available = BIT(IIO_CHAN_INFO_SAMP_FREQ)
 				    | BIT(IIO_CHAN_INFO_OVERSAMPLING_RATIO),
+		.event_spec = ads112c14_uv_event,
+		.num_event_specs = ARRAY_SIZE(ads112c14_uv_event),
 		.ext_info = ads112c14_ext_info,
 	},
 	{
@@ -306,6 +317,8 @@ static const struct iio_chan_spec ads112c14_sys_mon_channels[] = {
 				    | BIT(IIO_CHAN_INFO_OVERSAMPLING_RATIO),
 		.info_mask_separate_available = BIT(IIO_CHAN_INFO_SAMP_FREQ)
 				    | BIT(IIO_CHAN_INFO_OVERSAMPLING_RATIO),
+		.event_spec = ads112c14_uv_event,
+		.num_event_specs = ARRAY_SIZE(ads112c14_uv_event),
 		.ext_info = ads112c14_ext_info,
 	},
 	{
@@ -386,9 +399,176 @@ struct ads112c14_data {
 	int sinc4_sinc1_pf1_sample_rate_available[2][2];
 	int sinc_settling_time_range_available[ARRAY_SIZE(ads112c14_sinc_latency_tmod)][ARRAY_SIZE(ads112c14_fmod_div)][3][2];
 	int fir_settling_time_range_available[ARRAY_SIZE(ads112c14_fir_latency_tmod)][ARRAY_SIZE(ads112c14_fmod_div)][3][2];
+	bool avdd_uv_event_en;
+	bool ref_uv_event_en;
+	bool avdd_uv_fault_prev;
+	bool ref_uv_fault_prev;
 	IIO_DECLARE_BUFFER_WITH_TS(__be32, scan, ADS112C14_MAX_MEASUREMENT_CHANNELS +
 						 ARRAY_SIZE(ads112c14_sys_mon_channels));
 };
+
+static bool ads112c14_events_any_enabled(struct ads112c14_data *data)
+{
+	return data->avdd_uv_event_en || data->ref_uv_event_en;
+}
+
+/**
+ * ads112c14_push_events_from_status() - Push UV threshold events from status
+ * @indio_dev: IIO device instance
+ * @status_msb: STATUS_MSB byte captured with conversion data
+ * @timestamp: Timestamp to use for the event
+ */
+static void ads112c14_push_events_from_status(struct iio_dev *indio_dev,
+					      u8 status_msb, u64 timestamp)
+{
+	struct ads112c14_data *data = iio_priv(indio_dev);
+	bool avdd_uv_fault;
+	bool ref_uv_fault;
+
+	if (!ads112c14_events_any_enabled(data))
+		return;
+
+	avdd_uv_fault = data->avdd_uv_event_en &&
+			!FIELD_GET(ADS112C14_STATUS_MSB_AVDD_UVN, status_msb);
+	if (avdd_uv_fault && !data->avdd_uv_fault_prev)
+		iio_push_event(indio_dev,
+			       IIO_UNMOD_EVENT_CODE(IIO_VOLTAGE,
+						    ADS112C14_SYS_MON_CHANNEL_AVDD,
+						    IIO_EV_TYPE_THRESH,
+						    IIO_EV_DIR_FALLING),
+			       timestamp);
+
+	ref_uv_fault = data->ref_uv_event_en &&
+		       !FIELD_GET(ADS112C14_STATUS_MSB_REF_UVN, status_msb);
+	if (ref_uv_fault && !data->ref_uv_fault_prev)
+		iio_push_event(indio_dev,
+			       IIO_UNMOD_EVENT_CODE(IIO_VOLTAGE,
+						    ADS112C14_SYS_MON_CHANNEL_EXT_REF,
+						    IIO_EV_TYPE_THRESH,
+						    IIO_EV_DIR_FALLING),
+			       timestamp);
+
+	data->avdd_uv_fault_prev = avdd_uv_fault;
+	data->ref_uv_fault_prev = ref_uv_fault;
+}
+
+/**
+ * ads112c14_read_data() - Read conversion payload and optional status bytes
+ * @data: Driver private data
+ * @buf: Output sample buffer
+ * @for_scan: True when called from buffered path, false for raw reads
+ * @status_msb: Output pointer for STATUS_MSB from payload
+ *
+ * Reads RDATA payload as [status bytes][sample bytes][CRC], depending on
+ * active event and CRC settings. For buffered reads, CRC byte is copied after
+ * sample bytes so userspace can inspect it rather than silently dropping
+ * samples with CRC errors.
+ */
+static int ads112c14_read_data(struct ads112c14_data *data, u8 *buf,
+			       bool for_scan, u8 *status_msb)
+{
+	struct i2c_client *client = to_i2c_client(regmap_get_device(data->regmap));
+	u8 sample_bytes = BITS_TO_BYTES(data->chip_info->resolution_bits);
+	u8 status_bytes = ads112c14_events_any_enabled(data) ? 2 : 0;
+	u8 crc_bytes = data->i2c_crc_enabled ? 1 : 0;
+	u8 rx_buf[6]; /* 2 status bytes, up to 3 data bytes, 1 CRC byte */
+	u8 rx_len = status_bytes + sample_bytes + crc_bytes;
+	u8 sample_start = status_bytes;
+	int ret;
+
+	if (rx_len > sizeof(rx_buf))
+		return -EINVAL;
+
+	ret = i2c_smbus_read_i2c_block_data(client, ADS112C14_CMD_RDATA, rx_len,
+					    rx_buf);
+	if (ret < 0)
+		return ret;
+
+	*status_msb = status_bytes ? rx_buf[0] : ADS112C14_STATUS_MSB_AVDD_UVN |
+						 ADS112C14_STATUS_MSB_REF_UVN |
+						 ADS112C14_STATUS_MSB_REG_MAP_CRC_FAULTN |
+						 ADS112C14_STATUS_MSB_MEM_FAULTN |
+						 ADS112C14_STATUS_MSB_REG_WRITE_FAULTN;
+
+	if (!for_scan && data->i2c_crc_enabled) {
+		u8 crc = crc8(ads112c14_crc8_table, &rx_buf[0], rx_len - 1,
+			      CRC8_INIT_VALUE);
+
+		if (crc != rx_buf[sample_start + sample_bytes])
+			return -EBADMSG;
+	}
+
+	memcpy(buf, &rx_buf[sample_start], sample_bytes + (for_scan ? crc_bytes : 0));
+
+	return 0;
+}
+
+static int ads112c14_read_event_config(struct iio_dev *indio_dev,
+					const struct iio_chan_spec *chan,
+					enum iio_event_type type,
+					enum iio_event_direction dir)
+{
+	struct ads112c14_data *data = iio_priv(indio_dev);
+
+	if (type != IIO_EV_TYPE_THRESH || dir != IIO_EV_DIR_FALLING)
+		return -EINVAL;
+
+	guard(mutex)(&data->lock);
+
+	switch (chan->channel) {
+	case ADS112C14_SYS_MON_CHANNEL_AVDD:
+		return data->avdd_uv_event_en;
+	case ADS112C14_SYS_MON_CHANNEL_EXT_REF:
+		return data->ref_uv_event_en;
+	default:
+		return -EINVAL;
+	}
+}
+
+static int ads112c14_write_event_config(struct iio_dev *indio_dev,
+					 const struct iio_chan_spec *chan,
+					 enum iio_event_type type,
+					 enum iio_event_direction dir,
+					 bool state)
+{
+	struct ads112c14_data *data = iio_priv(indio_dev);
+	u32 clear_fault_mask = 0;
+	int ret;
+
+	if (type != IIO_EV_TYPE_THRESH || dir != IIO_EV_DIR_FALLING)
+		return -EINVAL;
+
+	guard(mutex)(&data->lock);
+
+	switch (chan->channel) {
+	case ADS112C14_SYS_MON_CHANNEL_AVDD:
+		data->avdd_uv_event_en = state;
+		clear_fault_mask |= ADS112C14_STATUS_MSB_AVDD_UVN;
+		data->avdd_uv_fault_prev = false;
+		break;
+	case ADS112C14_SYS_MON_CHANNEL_EXT_REF:
+		data->ref_uv_event_en = state;
+		clear_fault_mask |= ADS112C14_STATUS_MSB_REF_UVN;
+		data->ref_uv_fault_prev = false;
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	ret = regmap_assign_bits(data->regmap, ADS112C14_REG_REFERENCE_CFG,
+				 ADS112C14_REFERENCE_CFG_REF_UV_EN,
+				 data->ref_uv_event_en);
+	if (ret)
+		return ret;
+
+	ret = regmap_assign_bits(data->regmap, ADS112C14_REG_DIGITAL_CFG,
+				 ADS112C14_DIGITAL_CFG_STATUS_EN,
+				 ads112c14_events_any_enabled(data));
+	if (ret)
+		return ret;
+
+	return regmap_write(data->regmap, ADS112C14_REG_STATUS_MSB, clear_fault_mask);
+}
 
 static irqreturn_t ads112c14_drdy_irq_handler(int irq, void *private)
 {
@@ -1013,27 +1193,15 @@ static int ads112c14_prepare_channel(struct ads112c14_data *data,
 	return ads112c14_prepare_sys_mon_channel(data, chan);
 }
 
-static int ads112c14_scan_read(struct ads112c14_data *data, u8 *buf)
-{
-	struct i2c_client *client = to_i2c_client(regmap_get_device(data->regmap));
-	u8 len = BITS_TO_BYTES(data->chip_info->resolution_bits) +
-		 (data->i2c_crc_enabled ? 1 : 0);
-	int ret;
-
-	ret = i2c_smbus_read_i2c_block_data(client, ADS112C14_CMD_RDATA, len, buf);
-	if (ret < 0)
-		return ret;
-
-	return 0;
-}
-
-static int ads112c14_single_conversion(struct ads112c14_data *data,
+static int ads112c14_single_conversion(struct iio_dev *indio_dev,
 				       const struct iio_chan_spec *chan,
-				       u8 *buf, bool en_burnout, bool for_scan)
+				       u8 *buf, bool en_burnout, bool for_scan,
+				       s64 timestamp)
 {
-	struct i2c_client *client = to_i2c_client(regmap_get_device(data->regmap));
+	struct ads112c14_data *data = iio_priv(indio_dev);
 	struct ads112c14_channel_state *channel_state;
 	u32 settle_time_us, reg_val;
+	u8 status_msb;
 	int ret;
 
 	guard(mutex)(&data->lock);
@@ -1092,18 +1260,13 @@ static int ads112c14_single_conversion(struct ads112c14_data *data,
 			return ret;
 	}
 
-	/*
-	 * When doing buffered read, we don't check the CRC, but rather pass it
-	 * along with the raw data. This way, we don't silently drop samples
-	 * with CRC errors, but rather leave it to userspace to decide what to
-	 * do.
-	 */
-	if (for_scan)
-		return ads112c14_scan_read(data, buf);
+	ret = ads112c14_read_data(data, buf, for_scan, &status_msb);
+	if (ret)
+		return ret;
 
-	return ads112c14_i2c_read_bytes(client, ADS112C14_CMD_RDATA, buf,
-					BITS_TO_BYTES(data->chip_info->resolution_bits),
-					data->i2c_crc_enabled);
+	ads112c14_push_events_from_status(indio_dev, status_msb, timestamp);
+
+	return 0;
 }
 
 static int ads112c14_read_raw(struct iio_dev *indio_dev,
@@ -1135,7 +1298,8 @@ static int ads112c14_read_raw(struct iio_dev *indio_dev,
 		if (IIO_DEV_ACQUIRE_FAILED(claim))
 			return -EBUSY;
 
-		ret = ads112c14_single_conversion(data, chan, buf, false, false);
+		ret = ads112c14_single_conversion(indio_dev, chan, buf, false, false,
+						  iio_get_time_ns(indio_dev));
 		if (ret)
 			return ret;
 
@@ -1561,11 +1725,14 @@ static irqreturn_t ads112c14_trigger_handler(int irq, void *private)
 	int ret;
 
 	if (iio_trigger_using_own(indio_dev)) {
+		u8 status_msb;
+
 		i = find_first_bit(indio_dev->active_scan_mask, scan_mask_len);
 		if (i >= scan_mask_len)
 			goto out;
 
-		ret = ads112c14_scan_read(data, (u8 *)&data->scan[0]);
+		ret = ads112c14_read_data(data, (u8 *)&data->scan[0], true,
+					  &status_msb);
 		if (ret) {
 			const struct iio_chan_spec *chan = &indio_dev->channels[i];
 
@@ -1575,6 +1742,8 @@ static irqreturn_t ads112c14_trigger_handler(int irq, void *private)
 			goto out;
 		}
 
+		ads112c14_push_events_from_status(indio_dev, status_msb, pf->timestamp);
+
 		iio_push_to_buffers_with_ts(indio_dev, data->scan,
 					    sizeof(data->scan), pf->timestamp);
 		goto out;
@@ -1583,9 +1752,9 @@ static irqreturn_t ads112c14_trigger_handler(int irq, void *private)
 	iio_for_each_active_channel(indio_dev, i) {
 		const struct iio_chan_spec *chan = &indio_dev->channels[i];
 
-		ret = ads112c14_single_conversion(data, chan,
+		ret = ads112c14_single_conversion(indio_dev, chan,
 						  (u8 *)&data->scan[offset++],
-						  false, true);
+						  false, true, pf->timestamp);
 		if (ret) {
 			dev_err_once(indio_dev->dev.parent,
 				     "failed to read channel %d: %pe; additional errors will be suppressed\n",
@@ -1607,6 +1776,8 @@ static const struct iio_info ads112c14_info = {
 	.read_avail = ads112c14_read_avail,
 	.write_raw = ads112c14_write_raw,
 	.write_raw_get_fmt = ads112c14_write_raw_get_fmt,
+	.read_event_config = ads112c14_read_event_config,
+	.write_event_config = ads112c14_write_event_config,
 	.debugfs_reg_access = ads112c14_debugfs_reg_access,
 	.read_label = ads112c14_read_label,
 };
@@ -1803,7 +1974,8 @@ static ssize_t ads112c14_read_burnout_raw(struct iio_dev *indio_dev,
 	if (ret)
 		return ret;
 
-	ret = ads112c14_single_conversion(data, chan, raw_buf, true, false);
+	ret = ads112c14_single_conversion(indio_dev, chan, raw_buf, true, false,
+					  iio_get_time_ns(indio_dev));
 
 	/*
 	 * Important to always turn off burnout current even if the conversion
